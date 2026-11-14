@@ -286,8 +286,8 @@ export function VoiceChat() {
 
   return (
     <section className="flex min-h-screen w-full flex-col overflow-x-hidden bg-[#faf7f2]">
-      {/* Full-Width Top Navy Header Bar */}
-      <header className="flex w-full shrink-0 items-center justify-between bg-[#133256] px-5 py-3 text-white sm:px-8 sm:py-3.5">
+      {/* Full-Width Top Ocean Blue Header Bar */}
+      <header className="flex w-full shrink-0 items-center justify-between bg-linear-to-r from-[#12679B] to-[#174B77] px-5 py-3 text-white sm:px-8 sm:py-3.5">
         <div className="flex items-center gap-3.5">
           {/* Dual-Diamond Emblem Logo */}
           <svg
@@ -330,7 +330,7 @@ export function VoiceChat() {
         </div>
 
         {/* Right Settings Icon */}
-        <div className="flex items-center gap-3 text-white/90">
+        <div className="flex items-center gap-3 text-white">
           <button
             type="button"
             onClick={() => setShowDetails((prev) => !prev)}
