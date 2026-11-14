@@ -22,5 +22,104 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+@keyframes mascot-sky-gradient {
+  0% {
+    transform: translate3d(-4%, -2%, 0) scale(1.12);
+    opacity: 0.55;
+  }
+  50% {
+    transform: translate3d(4%, 2%, 0) scale(1.16);
+    opacity: 0.85;
+  }
+  100% {
+    transform: translate3d(-4%, -2%, 0) scale(1.12);
+    opacity: 0.55;
+  }
+}
+
+@keyframes mascot-wave-forward-a {
+  0% {
+    transform: translate3d(0, 0px, 0);
+  }
+  25% {
+    transform: translate3d(-12.5%, -3px, 0);
+  }
+  50% {
+    transform: translate3d(-25%, 0px, 0);
+  }
+  75% {
+    transform: translate3d(-37.5%, 3px, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0px, 0);
+  }
+}
+
+@keyframes mascot-wave-reverse-b {
+  0% {
+    transform: translate3d(-50%, 0px, 0);
+  }
+  25% {
+    transform: translate3d(-37.5%, 4px, 0);
+  }
+  50% {
+    transform: translate3d(-25%, 0px, 0);
+  }
+  75% {
+    transform: translate3d(-12.5%, -4px, 0);
+  }
+  100% {
+    transform: translate3d(0, 0px, 0);
+  }
+}
+
+@keyframes mascot-wave-forward-c {
+  0% {
+    transform: translate3d(0, 0px, 0);
+  }
+  25% {
+    transform: translate3d(-12.5%, 3px, 0);
+  }
+  50% {
+    transform: translate3d(-25%, 0px, 0);
+  }
+  75% {
+    transform: translate3d(-37.5%, -3px, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0px, 0);
+  }
+}
+
+.animate-mascot-sky-gradient {
+  animation: mascot-sky-gradient 20s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.animate-mascot-wave-back {
+  animation: mascot-wave-forward-a 19s linear infinite;
+  will-change: transform;
+}
+
+.animate-mascot-wave-mid {
+  animation: mascot-wave-reverse-b 16s linear infinite;
+  will-change: transform;
+}
+
+.animate-mascot-wave-front {
+  animation: mascot-wave-forward-c 13s linear infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-mascot-sky-gradient,
+  .animate-mascot-wave-back,
+  .animate-mascot-wave-mid,
+  .animate-mascot-wave-front {
+    animation: none !important;
+    transform: none !important;
+  }
 }

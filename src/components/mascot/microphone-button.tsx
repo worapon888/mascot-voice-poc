@@ -4,6 +4,7 @@ import type { VoiceState } from '@/types/voice';
 
 interface MicrophoneButtonProps {
   voiceState: VoiceState;
+  amplitude?: number;
   elapsedSeconds: number;
   maxRecordingSeconds: number;
   autoplayBlocked: boolean;
@@ -15,6 +16,9 @@ interface MicrophoneButtonProps {
   onPlayBlockedAudio: () => void;
 }
 
+const LEFT_WAVE_BARS = [4, 4, 14, 9, 26, 16, 36, 22, 14, 9, 5] as const;
+const RIGHT_WAVE_BARS = [5, 9, 14, 22, 36, 16, 26, 9, 14, 4, 4] as const;
+
 function formatTimer(seconds: number): string {
   const mins = Math.floor(seconds / 60)
     .toString()
@@ -25,6 +29,7 @@ function formatTimer(seconds: number): string {
 
 export function MicrophoneButton({
   voiceState,
+  amplitude = 0,
   elapsedSeconds,
   maxRecordingSeconds,
   autoplayBlocked,
@@ -40,119 +45,217 @@ export function MicrophoneButton({
     voiceState === 'thinking' ||
     voiceState === 'synthesizing';
 
+  const isWaveActive = voiceState === 'recording' || voiceState === 'speaking';
+  const dynamicScale =
+    voiceState === 'speaking'
+      ? 1 + Math.min(0.85, amplitude * 1.4)
+      : voiceState === 'recording'
+        ? 1.2
+        : 1;
+
+  const handlePrimaryClick = () => {
+    if (voiceState === 'idle' || voiceState === 'error') {
+      onStartRecording();
+    } else if (voiceState === 'recording') {
+      onStopAndSubmit();
+    } else if (voiceState === 'speaking') {
+      onStopAudio();
+    }
+  };
+
+  const primaryTestId =
+    voiceState === 'recording'
+      ? 'stop-and-submit-btn'
+      : voiceState === 'speaking'
+        ? 'stop-audio-btn'
+        : isProcessing
+          ? 'processing-indicator-btn'
+          : 'start-recording-btn';
+
+  const primaryLabel =
+    voiceState === 'recording'
+      ? 'กดเพื่อส่งคำถาม'
+      : isProcessing
+        ? 'กำลังประมวลผล...'
+        : voiceState === 'speaking'
+          ? 'กดเพื่อหยุดเสียง'
+          : 'กดเพื่อพูด';
+
+  const outerRingClass =
+    voiceState === 'recording'
+      ? 'bg-rose-400 shadow-[0_0_24px_rgba(244,63,94,0.45)]'
+      : voiceState === 'speaking'
+        ? 'bg-[#5ce1d2] shadow-[0_0_22px_rgba(45,212,191,0.45)]'
+        : 'bg-[#7ce2d4] shadow-[0_6px_18px_rgba(15,43,72,0.14)]';
+
+  const waveBarColor =
+    voiceState === 'recording'
+      ? 'bg-rose-400'
+      : voiceState === 'speaking'
+        ? 'bg-[#3bc4bd]'
+        : 'bg-[#9ab3c9]';
+
   return (
-    <div className="flex flex-col items-center gap-3">
-      {/* Recording Timer */}
-      {voiceState === 'recording' && (
+    <div className="flex w-full flex-col items-center">
+      {/* Soundwave Bars + Central Circular Microphone Button */}
+      <div className="flex items-center justify-center gap-5 sm:gap-7">
+        {/* Left Equalizer Bars */}
         <div
-          data-testid="recording-timer"
-          className="inline-flex items-center gap-2 rounded-full bg-rose-50 px-4 py-1 text-sm font-semibold text-rose-700 ring-1 ring-rose-200"
+          aria-hidden="true"
+          className="flex h-12 items-center gap-[5px] sm:gap-[6px]"
         >
-          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-rose-600" />
-          <span>
-            เวลาบันทึก: {formatTimer(elapsedSeconds)} /{' '}
-            {formatTimer(maxRecordingSeconds)}
+          {LEFT_WAVE_BARS.map((baseHeight, idx) => {
+            const height = isWaveActive
+              ? Math.max(
+                  4,
+                  Math.round(
+                    baseHeight *
+                      (idx % 2 === 0
+                        ? dynamicScale
+                        : 0.85 + dynamicScale * 0.2),
+                  ),
+                )
+              : baseHeight;
+            return (
+              <span
+                key={`left-bar-${idx}`}
+                className={`w-[4px] rounded-full transition-all duration-100 ${waveBarColor} ${
+                  voiceState === 'recording' ? 'animate-pulse' : ''
+                }`}
+                style={{ height: `${height}px` }}
+              />
+            );
+          })}
+        </div>
+
+        {/* Center Circular Microphone Button */}
+        <button
+          type="button"
+          data-testid={primaryTestId}
+          disabled={isProcessing}
+          onClick={handlePrimaryClick}
+          aria-label={primaryLabel}
+          className={`group relative flex h-[104px] w-[104px] shrink-0 items-center justify-center rounded-full p-[6px] transition-transform duration-150 focus:ring-4 focus:ring-[#7ce2d4]/60 focus:outline-none sm:h-[112px] sm:w-[112px] lg:h-[clamp(90px,12.5dvh,124px)] lg:w-[clamp(90px,12.5dvh,124px)] ${outerRingClass} ${
+            isProcessing
+              ? 'cursor-not-allowed opacity-85'
+              : 'cursor-pointer hover:scale-[1.03] active:scale-[0.98]'
+          }`}
+        >
+          <span className="flex h-full w-full items-center justify-center rounded-full bg-linear-to-b from-[#1b406c] via-[#122f54] to-[#0a1f3a] text-white shadow-inner">
+            {isProcessing ? (
+              <span className="h-9 w-9 animate-spin rounded-full border-4 border-white/85 border-t-transparent" />
+            ) : (
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-11 w-11 text-white transition-transform group-hover:scale-105 sm:h-12 sm:w-12 lg:h-[46%] lg:w-[46%]"
+              >
+                {/* Solid White Capsule Mic Head */}
+                <rect
+                  x="8.5"
+                  y="3"
+                  width="7"
+                  height="11.5"
+                  rx="3.5"
+                  fill="currentColor"
+                />
+                {/* U-Shaped Cradle & Base */}
+                <path
+                  d="M6 10.75a6 6 0 0 0 12 0M12 16.75v3.75M8.75 20.5h6.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.1"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
           </span>
+        </button>
+
+        {/* Right Equalizer Bars */}
+        <div
+          aria-hidden="true"
+          className="flex h-12 items-center gap-[5px] sm:gap-[6px]"
+        >
+          {RIGHT_WAVE_BARS.map((baseHeight, idx) => {
+            const height = isWaveActive
+              ? Math.max(
+                  4,
+                  Math.round(
+                    baseHeight *
+                      (idx % 2 === 1
+                        ? dynamicScale
+                        : 0.85 + dynamicScale * 0.2),
+                  ),
+                )
+              : baseHeight;
+            return (
+              <span
+                key={`right-bar-${idx}`}
+                className={`w-[4px] rounded-full transition-all duration-100 ${waveBarColor} ${
+                  voiceState === 'recording' ? 'animate-pulse' : ''
+                }`}
+                style={{ height: `${height}px` }}
+              />
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Main Call-to-Action Text ("กดเพื่อพูด") */}
+      <p className="mt-2.5 text-[24px] leading-tight font-bold tracking-tight text-[#0f2942] sm:text-[26px] lg:mt-2 lg:text-[clamp(22px,2.8dvh,28px)]">
+        {primaryLabel}
+      </p>
+
+      {/* Secondary Contextual Controls (Recording Timer / Cancel / Blocked Audio) */}
+      {voiceState === 'recording' && (
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-2.5">
+          <div
+            data-testid="recording-timer"
+            className="inline-flex items-center gap-1.5 rounded-full bg-rose-100/90 px-3.5 py-1 text-xs font-semibold text-rose-800"
+          >
+            <span className="h-2 w-2 animate-pulse rounded-full bg-rose-600" />
+            <span>
+              {formatTimer(elapsedSeconds)} / {formatTimer(maxRecordingSeconds)}
+            </span>
+          </div>
+          <button
+            type="button"
+            data-testid="cancel-recording-btn"
+            onClick={onCancelRecording}
+            className="rounded-full border border-slate-300 bg-white px-3.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            ยกเลิก
+          </button>
         </div>
       )}
 
-      {/* Autoplay Blocked Manual Play Button */}
-      {autoplayBlocked && (
-        <button
-          type="button"
-          data-testid="play-blocked-audio-btn"
-          onClick={onPlayBlockedAudio}
-          className="inline-flex items-center justify-center gap-2 rounded-full bg-teal-600 px-6 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-teal-700 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 focus:outline-none"
-        >
-          <span>🔊 เล่นเสียงตอบกลับ</span>
-        </button>
+      {isProcessing && (
+        <div className="mt-2">
+          <button
+            type="button"
+            data-testid="cancel-processing-btn"
+            onClick={onCancelProcessing}
+            className="rounded-full border border-slate-300 bg-white px-3.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            ยกเลิกคำขอ
+          </button>
+        </div>
       )}
 
-      {/* Main Action Controls by State */}
-      <div className="flex flex-wrap items-center justify-center gap-3">
-        {(voiceState === 'idle' || voiceState === 'error') && (
+      {autoplayBlocked && (
+        <div className="mt-2.5">
           <button
             type="button"
-            data-testid="start-recording-btn"
-            onClick={onStartRecording}
-            className="inline-flex items-center justify-center gap-2.5 rounded-full bg-[#164775] px-7 py-3.5 text-base font-semibold text-white shadow-md transition hover:bg-[#11385d] active:scale-[0.99] focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:outline-none"
+            data-testid="play-blocked-audio-btn"
+            onClick={onPlayBlockedAudio}
+            className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[#133256] px-5 py-2 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1b4370]"
           >
-            <svg
-              aria-hidden="true"
-              className="h-5 w-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
-              />
-            </svg>
-            <span>กดเพื่อพูดคำถาม</span>
+            <span>🔊 เล่นเสียงตอบกลับ</span>
           </button>
-        )}
-
-        {voiceState === 'recording' && (
-          <>
-            <button
-              type="button"
-              data-testid="stop-and-submit-btn"
-              onClick={onStopAndSubmit}
-              className="inline-flex items-center justify-center gap-2 rounded-full bg-rose-600 px-6 py-3.5 text-base font-semibold text-white shadow-md transition hover:bg-rose-700 focus:ring-2 focus:ring-rose-500 focus:ring-offset-2 focus:outline-none"
-            >
-              <span className="h-3 w-3 rounded-xs bg-white" />
-              <span>หยุดและส่ง</span>
-            </button>
-
-            <button
-              type="button"
-              data-testid="cancel-recording-btn"
-              onClick={onCancelRecording}
-              className="inline-flex items-center justify-center rounded-full border border-slate-300 bg-white px-5 py-3.5 text-sm font-medium text-slate-700 shadow-xs transition hover:bg-slate-50 focus:ring-2 focus:ring-slate-400 focus:outline-none"
-            >
-              ยกเลิก
-            </button>
-          </>
-        )}
-
-        {isProcessing && (
-          <>
-            <button
-              type="button"
-              disabled
-              data-testid="processing-indicator-btn"
-              className="inline-flex cursor-not-allowed items-center justify-center gap-2.5 rounded-full bg-slate-200 px-6 py-3.5 text-base font-medium text-slate-600"
-            >
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-500 border-t-transparent" />
-              <span>กำลังประมวลผล...</span>
-            </button>
-
-            <button
-              type="button"
-              data-testid="cancel-processing-btn"
-              onClick={onCancelProcessing}
-              className="inline-flex items-center justify-center rounded-full border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-            >
-              ยกเลิกคำขอ
-            </button>
-          </>
-        )}
-
-        {voiceState === 'speaking' && (
-          <button
-            type="button"
-            data-testid="stop-audio-btn"
-            onClick={onStopAudio}
-            className="inline-flex items-center justify-center gap-2 rounded-full bg-amber-600 px-6 py-3.5 text-base font-semibold text-white shadow-md transition hover:bg-amber-700 focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 focus:outline-none"
-          >
-            <span className="h-3 w-3 rounded-xs bg-white" />
-            <span>หยุดเสียง</span>
-          </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
