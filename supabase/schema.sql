@@ -1,2 +1,10 @@
--- Supabase PostgreSQL schema for mascot-voice-poc
--- Database tables and indexes will be defined in the database integration phase.
+CREATE TABLE IF NOT EXISTS public.faqs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  question TEXT NOT NULL UNIQUE,
+  answer TEXT NOT NULL,
+  keywords TEXT[] NOT NULL DEFAULT '{}',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.faqs ENABLE ROW LEVEL SECURITY;

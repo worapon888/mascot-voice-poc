@@ -10,8 +10,9 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
+# testing & smoke artifacts
 /coverage
+/.smoke-tmp
 
 # next.js
 /.next/

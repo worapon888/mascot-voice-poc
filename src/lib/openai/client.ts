@@ -6,6 +6,7 @@ export const OPENAI_MODELS = {
   STT: 'gpt-transcribe',
   LLM: 'gpt-4.1-mini',
   TTS: 'gpt-4o-mini-tts',
+  TTS_VOICE: 'coral',
 } as const;
 
 let openAIClientInstance: OpenAI | null = null;

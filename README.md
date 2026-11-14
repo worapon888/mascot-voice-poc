@@ -6,7 +6,7 @@ Thai-speaking **2D Mascot AI Voice Chatbot Proof of Concept (POC)** built with N
 
 ## 1. Project Purpose
 
-This repository contains the foundational Next.js project setup, modular architecture boundaries, and automated code-quality tooling (ESLint, Prettier, TypeScript Strict Mode, Husky, and lint-staged) for the Thai-speaking 2D Mascot AI Voice Chatbot POC.
+This repository contains the foundational Next.js project setup, Supabase FAQ repository layer, G0 technical readiness smoke-test runner, and automated code-quality tooling (ESLint, Prettier, TypeScript Strict Mode, Husky, and lint-staged) for the Thai-speaking 2D Mascot AI Voice Chatbot POC.
 
 ---
 
@@ -21,8 +21,8 @@ This repository contains the foundational Next.js project setup, modular archite
 | Backend                | Next.js Route Handlers (`nodejs` runtime)                     |
 | Database               | Supabase PostgreSQL (`@supabase/supabase-js`)                 |
 | STT                    | OpenAI `gpt-transcribe`                                       |
-| LLM                    | OpenAI `gpt-4.1-mini`                                         |
-| TTS                    | OpenAI `gpt-4o-mini-tts`                                      |
+| LLM                    | OpenAI `gpt-4.1-mini` (Responses API)                         |
+| TTS                    | OpenAI `gpt-4o-mini-tts` (Voice: `coral`, Format: `mp3`)      |
 | Validation             | Zod (`zod`)                                                   |
 | Server Boundary Guard  | `server-only`                                                 |
 | Git Hooks              | Husky                                                         |
@@ -35,7 +35,7 @@ This repository contains the foundational Next.js project setup, modular archite
 
 ## 3. Prerequisites
 
-- **Node.js**: v20.9+ or v22 LTS (verified with `v22.19.0`)
+- **Node.js**: v22 LTS (verified with `v22.19.0`)
 - **pnpm**: v9+ / v12+ (verified with `12.15.0`)
 - **Git**: v2.30+
 
@@ -50,7 +50,14 @@ pnpm install
 # 2. Copy environment variables template
 cp .env.example .env.local
 
-# 3. Start local development server
+# 3. Execute database schema and seed in Supabase SQL Editor (or via psql)
+# - supabase/schema.sql
+# - supabase/seed.sql
+
+# 4. Run G0 technical readiness smoke tests
+pnpm run smoke:g0
+
+# 5. Start local development server
 pnpm dev
 ```
 
@@ -70,23 +77,29 @@ SUPABASE_SECRET_KEY=
 
 - `.env.local` is ignored by Git (`.gitignore`).
 - Never expose `OPENAI_API_KEY` or `SUPABASE_SECRET_KEY` via `NEXT_PUBLIC_` variables.
+- `SUPABASE_SECRET_KEY` must be the server-side Supabase Secret Key (`sb_secret_...` or `service_role` key) so the server-only client can query `public.faqs` with Row Level Security (RLS) enabled and no anonymous policy.
 - External clients (`src/lib/openai/client.ts` and `src/lib/supabase/client.ts`) are guarded with `import 'server-only'` and initialized lazily so the homepage can render even before credentials are provided.
 
 ---
 
-## 6. Local Development & Code Quality Commands
+## 6. Local Development, Code Quality & G0 Smoke-Test Commands
 
-| Command             | Description                                                 |
-| ------------------- | ----------------------------------------------------------- |
-| `pnpm dev`          | Start the local Next.js development server                  |
-| `pnpm build`        | Build the application for production                        |
-| `pnpm start`        | Start the production server                                 |
-| `pnpm lint`         | Run ESLint across the project using ESLint CLI              |
-| `pnpm typecheck`    | Run TypeScript compiler validation (`tsc --noEmit`)         |
-| `pnpm format`       | Format all project files with Prettier                      |
-| `pnpm format:check` | Check formatting across the project without modifying files |
-| `pnpm check`        | Run `typecheck`, `lint`, and `format:check` sequentially    |
-| `pnpm prepare`      | Initialize Husky Git hooks                                  |
+| Command                           | Description                                                          |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `pnpm dev`                        | Start the local Next.js development server                           |
+| `pnpm build`                      | Build the application for production                                 |
+| `pnpm start`                      | Start the production server                                          |
+| `pnpm lint`                       | Run ESLint across the project using ESLint CLI                       |
+| `pnpm typecheck`                  | Run TypeScript compiler validation (`tsc --noEmit`)                  |
+| `pnpm format`                     | Format all project files with Prettier                               |
+| `pnpm format:check`               | Check formatting across the project without modifying files          |
+| `pnpm check`                      | Run `typecheck`, `lint`, and `format:check` sequentially             |
+| `pnpm run smoke:g0`               | Run all G0 technical readiness smoke tests (Supabase, TTS, STT, LLM) |
+| `pnpm run smoke:g0 -- --only=db`  | Run only Supabase database smoke tests (`DB01`–`DB05`)               |
+| `pnpm run smoke:g0 -- --only=stt` | Run only OpenAI `gpt-transcribe` STT smoke test                      |
+| `pnpm run smoke:g0 -- --only=llm` | Run only OpenAI `gpt-4.1-mini` LLM & grounded FAQ smoke tests        |
+| `pnpm run smoke:g0 -- --only=tts` | Run only OpenAI `gpt-4o-mini-tts` (`coral`) TTS smoke test           |
+| `pnpm prepare`                    | Initialize Husky Git hooks                                           |
 
 ---
 
@@ -102,16 +115,12 @@ Runs `pnpm exec lint-staged` on staged files only:
 - `*.{json,md,css,yml,yaml}`:
   1. `prettier --write`
 
-Does **not** run a full production build on pre-commit to keep commits fast.
-
 ### Pre-push Hook (`.husky/pre-push`)
 
 Runs full repository verification before allowing a `git push`:
 
 1. `pnpm run typecheck` (`tsc --noEmit`)
 2. `pnpm run lint` (`eslint`)
-
-If either check fails, the push is blocked with a non-zero exit status.
 
 ---
 
@@ -132,37 +141,25 @@ Verifies that the Next.js Node.js Route Handler runtime is up and responding.
 }
 ```
 
-_(Note: This endpoint intentionally does not expose secrets or claim external OpenAI/Supabase connectivity.)_
-
 ---
 
 ## 9. Current Implementation Status
 
-### Completed (Project Bootstrap & Tooling)
+### Completed (Prompt 1 & Prompt 2 — Setup & G0 Readiness)
 
 - [x] Next.js App Router initialized with TypeScript Strict Mode, Tailwind CSS, and `@/*` path alias
-- [x] Runtime (`openai`, `@supabase/supabase-js`, `zod`, `server-only`) and development (`husky`, `lint-staged`, `prettier`, `eslint`) dependencies installed
-- [x] ESLint CLI flat configuration (`eslint.config.mjs`) with Next.js Core Web Vitals, React Hooks, and TypeScript rules
-- [x] Prettier configuration (`.prettierrc.json`, `.prettierignore`) compatible with ESLint
-- [x] Husky `pre-commit` (`lint-staged`) and `pre-push` (`typecheck` + `lint`) hooks configured
-- [x] Modular project folder structure (`src/app/api/{health,stt,answer,tts}`, `src/components/mascot`, `src/lib/{openai,supabase,validations}`, `src/services`, `src/repositories`, `src/types`, `supabase/`)
-- [x] Server-only lazy client factories for OpenAI and Supabase
+- [x] ESLint 9, Prettier, Husky (`pre-commit`, `pre-push`), and `lint-staged` configured
+- [x] Server-only lazy client factories for OpenAI and Supabase (`src/lib/openai/client.ts`, `src/lib/supabase/client.ts`)
 - [x] Working `GET /api/health` endpoint
+- [x] Supabase PostgreSQL schema (`supabase/schema.sql`) with RLS enabled on `public.faqs`
+- [x] Five Thai demonstration FAQ records with keyword aliases (`supabase/seed.sql`)
+- [x] Strongly typed server-only FAQ repository (`src/repositories/faq.repository.ts`, `src/types/faq.ts`)
+- [x] Developer-only G0 smoke-test runner (`src/scripts/g0-smoke.ts` via `pnpm run smoke:g0`)
 
-### Not Yet Implemented (Future Tasks)
+### Not Yet Implemented (Subsequent Tasks)
 
-- [ ] Supabase schema definition (`supabase/schema.sql`) and Thai knowledge base seed (`supabase/seed.sql`)
-- [ ] Repository layer (`src/repositories/`) for knowledge retrieval from Supabase PostgreSQL
-- [ ] Speech-to-Text service & route (`POST /api/stt` using `gpt-transcribe`)
-- [ ] Question-Answering service & route (`POST /api/answer` using `gpt-4.1-mini` grounded on Supabase data)
-- [ ] Text-to-Speech service & route (`POST /api/tts` using `gpt-4o-mini-tts`)
+- [ ] Thai FAQ keyword matching and question-answering service (`src/services/`)
+- [ ] Speech-to-Text Route Handler (`POST /api/stt`)
+- [ ] Grounded Question-Answering Route Handler (`POST /api/answer`)
+- [ ] Text-to-Speech Route Handler (`POST /api/tts`)
 - [ ] 2D Mascot UI component (`src/components/mascot/`) with audio recording, playback, and mouth-sync states
-
----
-
-## 10. Next Development Steps
-
-1. Define the Supabase PostgreSQL table schema in `supabase/schema.sql` and seed data in `supabase/seed.sql`.
-2. Implement the Supabase knowledge repository in `src/repositories/` and QA service in `src/services/`.
-3. Implement the `POST /api/stt`, `POST /api/answer`, and `POST /api/tts` Route Handlers with Zod request validation.
-4. Build the 2D Mascot interactive voice UI in `src/components/mascot/` and connect it to the backend pipeline.

@@ -1,2 +1,37 @@
--- Supabase PostgreSQL seed data for mascot-voice-poc
--- Initial Thai Q&A knowledge base entries will be added in the database integration phase.
+INSERT INTO public.faqs (question, answer, keywords, is_active)
+VALUES
+  (
+    'เปิดบริการกี่โมง',
+    'จุดบริการ Demo เปิดจันทร์–ศุกร์ 09:00–16:00 น.',
+    ARRAY['เปิดบริการ', 'เวลาทำการ', 'เปิดกี่โมง', 'สำนักงานเปิดกี่โมง'],
+    TRUE
+  ),
+  (
+    'ต้องจองคิวไหม',
+    'บริการ Demo นี้รับนัดหมายล่วงหน้าผ่านเจ้าหน้าที่ Demo',
+    ARRAY['จองคิว', 'นัดหมาย', 'นัดล่วงหน้า', 'ต้องนัด'],
+    TRUE
+  ),
+  (
+    'เตรียมเอกสารอะไร',
+    'การทดลอง Demo ใช้เลขอ้างอิง DEMO-001 ไม่ต้องส่งเอกสารส่วนบุคคล',
+    ARRAY['เอกสาร', 'เตรียมเอกสาร', 'เอาอะไรไปบ้าง'],
+    TRUE
+  ),
+  (
+    'ทดลองผ่านมือถือได้ไหม',
+    'Demo นี้แนะนำ Chrome Desktop; Mobile ยังไม่รับรองจนกว่าจะทดสอบ',
+    ARRAY['มือถือ', 'เบราว์เซอร์'],
+    TRUE
+  ),
+  (
+    'ติดต่อใครเมื่อไม่มีคำตอบ',
+    'โปรดติดต่อผู้ดูแลการสาธิตเพื่อขอข้อมูลเพิ่มเติม',
+    ARRAY['ติดต่อ', 'เจ้าหน้าที่'],
+    TRUE
+  )
+ON CONFLICT (question) DO UPDATE
+SET
+  answer = EXCLUDED.answer,
+  keywords = EXCLUDED.keywords,
+  is_active = EXCLUDED.is_active;

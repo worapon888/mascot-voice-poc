@@ -1,4 +1,5 @@
 .next
+.smoke-tmp
 out
 build
 dist
