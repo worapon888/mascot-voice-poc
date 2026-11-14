@@ -6,30 +6,35 @@ Thai-speaking **2D Mascot AI Voice Chatbot Proof of Concept (POC)** built with N
 
 ## 1. Project Purpose
 
-This repository contains the Next.js project setup, Supabase FAQ repository layer, deterministic Thai FAQ retrieval service, Backend Voice Pipeline Route Handlers (`POST /api/stt`, `POST /api/answer`, `POST /api/tts`), G0 & Pipeline smoke-test runners, and automated code-quality tooling (ESLint, Prettier, TypeScript Strict Mode, Husky, and lint-staged) for the Thai-speaking 2D Mascot AI Voice Chatbot POC.
+This repository contains the complete 2D Mascot AI Voice Chatbot POC:
+
+- Original 2D Mascot UI (`MascotAvatar`, `VoiceChat`, `MicrophoneButton`, `ConversationPanel`)
+- Browser-native microphone recording (`MediaRecorder`) and Web Audio API real-time amplitude-driven mouth lip-sync (`AnalyserNode` + `requestAnimationFrame`)
+- Backend Voice Pipeline Route Handlers (`POST /api/stt`, `POST /api/answer`, `POST /api/tts`, `GET /api/health`)
+- Deterministic Thai FAQ retrieval service grounded on Supabase PostgreSQL (`public.faqs`)
+- Automated code-quality tooling (ESLint, Prettier, TypeScript Strict Mode, Husky, and lint-staged)
 
 ---
 
 ## 2. Technology Stack
 
-| Component              | Technology                                                    |
-| ---------------------- | ------------------------------------------------------------- |
-| Framework              | Next.js 16 (App Router)                                       |
-| Language               | TypeScript (Strict Mode)                                      |
-| Styling                | Tailwind CSS v4                                               |
-| Package Manager        | pnpm                                                          |
-| Backend                | Next.js Route Handlers (`nodejs` runtime)                     |
-| Database               | Supabase PostgreSQL (`@supabase/supabase-js`)                 |
-| STT                    | OpenAI `gpt-transcribe`                                       |
-| LLM                    | OpenAI `gpt-4.1-mini` (Responses API)                         |
-| TTS                    | OpenAI `gpt-4o-mini-tts` (Voice: `coral`, Format: `mp3`)      |
-| Validation             | Zod (`zod`)                                                   |
-| Server Boundary Guard  | `server-only`                                                 |
-| Git Hooks              | Husky                                                         |
-| Staged File Validation | lint-staged                                                   |
-| Linter                 | ESLint 9 (Flat Config + Next.js Core Web Vitals & TypeScript) |
-| Formatter              | Prettier                                                      |
-| Deployment             | Vercel                                                        |
+| Component                 | Technology                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------- |
+| Framework                 | Next.js 16 (App Router)                                                                           |
+| Language                  | TypeScript (Strict Mode)                                                                          |
+| Styling                   | Tailwind CSS v4                                                                                   |
+| Package Manager           | pnpm                                                                                              |
+| Frontend Audio & Lip-Sync | Browser `MediaRecorder` + Web Audio API (`AudioContext`, `AnalyserNode`, `requestAnimationFrame`) |
+| Backend                   | Next.js Route Handlers (`nodejs` runtime)                                                         |
+| Database                  | Supabase PostgreSQL (`@supabase/supabase-js`)                                                     |
+| STT                       | OpenAI `gpt-transcribe`                                                                           |
+| LLM                       | OpenAI `gpt-4.1-mini` (Responses API)                                                             |
+| TTS                       | OpenAI `gpt-4o-mini-tts` (Voice: `coral`, Format: `mp3`)                                          |
+| Validation                | Zod (`zod`)                                                                                       |
+| Server Boundary Guard     | `server-only`                                                                                     |
+| Git Hooks                 | Husky + `lint-staged`                                                                             |
+| Linter & Formatter        | ESLint 9 + Prettier                                                                               |
+| Deployment                | Vercel                                                                                            |
 
 ---
 
@@ -37,7 +42,7 @@ This repository contains the Next.js project setup, Supabase FAQ repository laye
 
 - **Node.js**: v22 LTS (verified with `v22.19.0`)
 - **pnpm**: v9+ / v12+ (verified with `12.15.0`)
-- **Git**: v2.30+
+- **Browser**: Google Chrome Desktop (recommended for microphone & Web Audio API)
 
 ---
 
@@ -106,61 +111,16 @@ OPENAI_TIMEOUT_MS=30000
 
 ## 7. API Endpoints
 
-### `GET /api/health`
-
-Returns service readiness (`200 OK`):
-
-```json
-{
-  "status": "ok",
-  "service": "mascot-voice-poc"
-}
-```
-
-### `POST /api/stt`
-
-- **Content-Type**: `multipart/form-data` (field `audio`, max 3 MB, verified via binary magic bytes: MP3, WAV, WebM, OGG, M4A)
-- **Response (`200 OK`)**:
-
-```json
-{
-  "transcript": "สำนักงานเปิดกี่โมงครับ"
-}
-```
-
-### `POST /api/answer`
-
-- **Content-Type**: `application/json` (`{ "transcript": "..." }`, 1–500 chars)
-- **Response (`200 OK`)**:
-
-```json
-{
-  "answer": "จุดบริการ Demo เปิดจันทร์–ศุกร์ 09:00–16:00 น. ครับ",
-  "faqIds": [1],
-  "matched": true
-}
-```
-
-### `POST /api/tts`
-
-- **Content-Type**: `application/json` (`{ "text": "..." }`, 1–500 chars)
-- **Response (`200 OK`)**: Binary MP3 audio (`Content-Type: audio/mpeg`, `Cache-Control: no-store`)
+- **`GET /api/health`** — Returns `{ "status": "ok", "service": "mascot-voice-poc" }`
+- **`POST /api/stt`** — `multipart/form-data` (`audio`, max 3 MB) → `{ "transcript": "..." }`
+- **`POST /api/answer`** — `application/json` (`{ "transcript": "..." }`) → `{ "answer": "...", "faqIds": [1], "matched": true }`
+- **`POST /api/tts`** — `application/json` (`{ "text": "..." }`) → Binary `audio/mpeg` (`Cache-Control: no-store`)
 
 ---
 
 ## 8. Current Implementation Status
 
-### Completed (Prompt 1, Prompt 2, Prompt 3)
-
-- [x] Next.js App Router initialized with TypeScript Strict Mode, Tailwind CSS, and `@/*` path alias
-- [x] ESLint 9, Prettier, Husky (`pre-commit`, `pre-push`), and `lint-staged` configured
-- [x] Supabase PostgreSQL schema (`supabase/schema.sql`) with RLS enabled & 5 seeded Thai FAQs (`supabase/seed.sql`)
-- [x] Strongly typed server-only FAQ repository (`src/repositories/faq.repository.ts`)
-- [x] Deterministic Thai FAQ retrieval service (`src/services/faq-matching.service.ts`)
-- [x] Backend Voice Pipeline services (`src/services/transcription.service.ts`, `src/services/answer.service.ts`, `src/services/speech.service.ts`)
-- [x] Route Handlers (`POST /api/stt`, `POST /api/answer`, `POST /api/tts`, `GET /api/health`)
-- [x] G0 (`pnpm run smoke:g0`) and Voice Pipeline (`pnpm run smoke:pipeline`) smoke-test runners
-
-### Not Yet Implemented (Prompt 4)
-
-- [ ] 2D Mascot UI component (`src/components/mascot/`) with microphone recording (`MediaRecorder`), playback, and audio-reactive mouth-sync states
+- [x] **Prompt 1**: Project Setup, TypeScript Strict Mode, ESLint, Prettier, Husky, `lint-staged`
+- [x] **Prompt 2**: Supabase PostgreSQL Schema & 5 Demo FAQs, Repository, G0 Smoke Tests (`9/9 PASSED`)
+- [x] **Prompt 3**: Backend Voice Pipeline (`/api/stt`, `/api/answer`, `/api/tts`) & HTTP Integration Tests (`7/7 PASSED`)
+- [x] **Prompt 4**: Original 2D Mascot Assets imported (`public/assets/mascot/`), Voice Interaction State Machine, `MediaRecorder` hook, Web Audio API RMS Lip-Sync hook, and Thai Frontend UI
