@@ -29,6 +29,9 @@ function resolveWithExtensions(candidatePath) {
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === 'next/server') {
+      return nextResolve('next/server.js', context);
+    }
     if (specifier.startsWith('@/')) {
       const target = path.join(projectRoot, 'src', specifier.slice(2));
       const resolved = resolveWithExtensions(target);

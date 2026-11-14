@@ -6,7 +6,7 @@ Thai-speaking **2D Mascot AI Voice Chatbot Proof of Concept (POC)** built with N
 
 ## 1. Project Purpose
 
-This repository contains the foundational Next.js project setup, Supabase FAQ repository layer, G0 technical readiness smoke-test runner, and automated code-quality tooling (ESLint, Prettier, TypeScript Strict Mode, Husky, and lint-staged) for the Thai-speaking 2D Mascot AI Voice Chatbot POC.
+This repository contains the Next.js project setup, Supabase FAQ repository layer, deterministic Thai FAQ retrieval service, Backend Voice Pipeline Route Handlers (`POST /api/stt`, `POST /api/answer`, `POST /api/tts`), G0 & Pipeline smoke-test runners, and automated code-quality tooling (ESLint, Prettier, TypeScript Strict Mode, Husky, and lint-staged) for the Thai-speaking 2D Mascot AI Voice Chatbot POC.
 
 ---
 
@@ -54,8 +54,9 @@ cp .env.example .env.local
 # - supabase/schema.sql
 # - supabase/seed.sql
 
-# 4. Run G0 technical readiness smoke tests
+# 4. Run G0 technical readiness & Voice Pipeline smoke tests
 pnpm run smoke:g0
+pnpm run smoke:pipeline
 
 # 5. Start local development server
 pnpm dev
@@ -71,68 +72,43 @@ Configure `.env.local` (never committed to Git) based on `.env.example`:
 OPENAI_API_KEY=
 SUPABASE_URL=
 SUPABASE_SECRET_KEY=
+DEMO_ENABLED=true
+OPENAI_TIMEOUT_MS=30000
 ```
 
-### Security Rules
+### Security & Cost-Control Rules
 
 - `.env.local` is ignored by Git (`.gitignore`).
 - Never expose `OPENAI_API_KEY` or `SUPABASE_SECRET_KEY` via `NEXT_PUBLIC_` variables.
 - `SUPABASE_SECRET_KEY` must be the server-side Supabase Secret Key (`sb_secret_...` or `service_role` key) so the server-only client can query `public.faqs` with Row Level Security (RLS) enabled and no anonymous policy.
-- External clients (`src/lib/openai/client.ts` and `src/lib/supabase/client.ts`) are guarded with `import 'server-only'` and initialized lazily so the homepage can render even before credentials are provided.
+- `DEMO_ENABLED`: Emergency kill-switch for paid API endpoints (`/api/stt`, `/api/answer`, `/api/tts`). Enabled by default in local development unless set to `false`; disabled by default in `NODE_ENV=production` unless explicitly set to `true`.
+- `OPENAI_TIMEOUT_MS`: Upstream timeout for OpenAI requests (default `30000` ms, with `maxRetries: 0` to prevent duplicate paid API charges).
 
 ---
 
-## 6. Local Development, Code Quality & G0 Smoke-Test Commands
+## 6. Local Development, Code Quality & Smoke-Test Commands
 
-| Command                           | Description                                                          |
-| --------------------------------- | -------------------------------------------------------------------- |
-| `pnpm dev`                        | Start the local Next.js development server                           |
-| `pnpm build`                      | Build the application for production                                 |
-| `pnpm start`                      | Start the production server                                          |
-| `pnpm lint`                       | Run ESLint across the project using ESLint CLI                       |
-| `pnpm typecheck`                  | Run TypeScript compiler validation (`tsc --noEmit`)                  |
-| `pnpm format`                     | Format all project files with Prettier                               |
-| `pnpm format:check`               | Check formatting across the project without modifying files          |
-| `pnpm check`                      | Run `typecheck`, `lint`, and `format:check` sequentially             |
-| `pnpm run smoke:g0`               | Run all G0 technical readiness smoke tests (Supabase, TTS, STT, LLM) |
-| `pnpm run smoke:g0 -- --only=db`  | Run only Supabase database smoke tests (`DB01`–`DB05`)               |
-| `pnpm run smoke:g0 -- --only=stt` | Run only OpenAI `gpt-transcribe` STT smoke test                      |
-| `pnpm run smoke:g0 -- --only=llm` | Run only OpenAI `gpt-4.1-mini` LLM & grounded FAQ smoke tests        |
-| `pnpm run smoke:g0 -- --only=tts` | Run only OpenAI `gpt-4o-mini-tts` (`coral`) TTS smoke test           |
-| `pnpm prepare`                    | Initialize Husky Git hooks                                           |
+| Command                   | Description                                                             |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `pnpm dev`                | Start the local Next.js development server                              |
+| `pnpm build`              | Build the application for production                                    |
+| `pnpm start`              | Start the production server                                             |
+| `pnpm lint`               | Run ESLint across the project using ESLint CLI                          |
+| `pnpm typecheck`          | Run TypeScript compiler validation (`tsc --noEmit`)                     |
+| `pnpm format`             | Format all project files with Prettier                                  |
+| `pnpm format:check`       | Check formatting across the project without modifying files             |
+| `pnpm check`              | Run `typecheck`, `lint`, and `format:check` sequentially                |
+| `pnpm run smoke:g0`       | Run G0 technical readiness smoke tests (Supabase, TTS, STT, LLM)        |
+| `pnpm run smoke:pipeline` | Run end-to-end Backend Voice Pipeline HTTP integration & negative tests |
+| `pnpm prepare`            | Initialize Husky Git hooks                                              |
 
 ---
 
-## 7. Git Hooks (Husky & lint-staged)
-
-### Pre-commit Hook (`.husky/pre-commit`)
-
-Runs `pnpm exec lint-staged` on staged files only:
-
-- `*.{js,jsx,ts,tsx}`:
-  1. `eslint --fix` (applies safe automatic fixes; aborts commit on unfixed lint errors)
-  2. `prettier --write`
-- `*.{json,md,css,yml,yaml}`:
-  1. `prettier --write`
-
-### Pre-push Hook (`.husky/pre-push`)
-
-Runs full repository verification before allowing a `git push`:
-
-1. `pnpm run typecheck` (`tsc --noEmit`)
-2. `pnpm run lint` (`eslint`)
-
----
-
-## 8. Health-Check Endpoint
+## 7. API Endpoints
 
 ### `GET /api/health`
 
-Verifies that the Next.js Node.js Route Handler runtime is up and responding.
-
-- **URL**: `http://localhost:3000/api/health`
-- **Method**: `GET`
-- **Response (`200 OK`)**:
+Returns service readiness (`200 OK`):
 
 ```json
 {
@@ -141,25 +117,50 @@ Verifies that the Next.js Node.js Route Handler runtime is up and responding.
 }
 ```
 
+### `POST /api/stt`
+
+- **Content-Type**: `multipart/form-data` (field `audio`, max 3 MB, verified via binary magic bytes: MP3, WAV, WebM, OGG, M4A)
+- **Response (`200 OK`)**:
+
+```json
+{
+  "transcript": "สำนักงานเปิดกี่โมงครับ"
+}
+```
+
+### `POST /api/answer`
+
+- **Content-Type**: `application/json` (`{ "transcript": "..." }`, 1–500 chars)
+- **Response (`200 OK`)**:
+
+```json
+{
+  "answer": "จุดบริการ Demo เปิดจันทร์–ศุกร์ 09:00–16:00 น. ครับ",
+  "faqIds": [1],
+  "matched": true
+}
+```
+
+### `POST /api/tts`
+
+- **Content-Type**: `application/json` (`{ "text": "..." }`, 1–500 chars)
+- **Response (`200 OK`)**: Binary MP3 audio (`Content-Type: audio/mpeg`, `Cache-Control: no-store`)
+
 ---
 
-## 9. Current Implementation Status
+## 8. Current Implementation Status
 
-### Completed (Prompt 1 & Prompt 2 — Setup & G0 Readiness)
+### Completed (Prompt 1, Prompt 2, Prompt 3)
 
 - [x] Next.js App Router initialized with TypeScript Strict Mode, Tailwind CSS, and `@/*` path alias
 - [x] ESLint 9, Prettier, Husky (`pre-commit`, `pre-push`), and `lint-staged` configured
-- [x] Server-only lazy client factories for OpenAI and Supabase (`src/lib/openai/client.ts`, `src/lib/supabase/client.ts`)
-- [x] Working `GET /api/health` endpoint
-- [x] Supabase PostgreSQL schema (`supabase/schema.sql`) with RLS enabled on `public.faqs`
-- [x] Five Thai demonstration FAQ records with keyword aliases (`supabase/seed.sql`)
-- [x] Strongly typed server-only FAQ repository (`src/repositories/faq.repository.ts`, `src/types/faq.ts`)
-- [x] Developer-only G0 smoke-test runner (`src/scripts/g0-smoke.ts` via `pnpm run smoke:g0`)
+- [x] Supabase PostgreSQL schema (`supabase/schema.sql`) with RLS enabled & 5 seeded Thai FAQs (`supabase/seed.sql`)
+- [x] Strongly typed server-only FAQ repository (`src/repositories/faq.repository.ts`)
+- [x] Deterministic Thai FAQ retrieval service (`src/services/faq-matching.service.ts`)
+- [x] Backend Voice Pipeline services (`src/services/transcription.service.ts`, `src/services/answer.service.ts`, `src/services/speech.service.ts`)
+- [x] Route Handlers (`POST /api/stt`, `POST /api/answer`, `POST /api/tts`, `GET /api/health`)
+- [x] G0 (`pnpm run smoke:g0`) and Voice Pipeline (`pnpm run smoke:pipeline`) smoke-test runners
 
-### Not Yet Implemented (Subsequent Tasks)
+### Not Yet Implemented (Prompt 4)
 
-- [ ] Thai FAQ keyword matching and question-answering service (`src/services/`)
-- [ ] Speech-to-Text Route Handler (`POST /api/stt`)
-- [ ] Grounded Question-Answering Route Handler (`POST /api/answer`)
-- [ ] Text-to-Speech Route Handler (`POST /api/tts`)
-- [ ] 2D Mascot UI component (`src/components/mascot/`) with audio recording, playback, and mouth-sync states
+- [ ] 2D Mascot UI component (`src/components/mascot/`) with microphone recording (`MediaRecorder`), playback, and audio-reactive mouth-sync states
