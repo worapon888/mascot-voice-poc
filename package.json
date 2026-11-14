@@ -11,6 +11,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check",
+    "test:normalizer": "node --import=./src/scripts/register-paths.mjs src/scripts/thai-speech-normalizer.test.ts",
     "smoke:g0": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/g0-smoke.ts",
     "smoke:pipeline": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/voice-pipeline-smoke.ts",
     "prepare": "husky"

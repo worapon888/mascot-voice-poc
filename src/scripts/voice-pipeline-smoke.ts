@@ -15,7 +15,10 @@ import {
   getActiveFaqs,
   updateFaqAnswer,
 } from '@/repositories/faq.repository';
-import { NO_MATCH_FALLBACK_ANSWER } from '@/services/answer.service';
+import {
+  hasUnsupportedFabricatedClaims,
+  NO_MATCH_FALLBACK_ANSWER,
+} from '@/services/answer.service';
 import { retrieveMatchingFaqs } from '@/services/faq-matching.service';
 import { detectAudioFormatFromSignature } from '@/services/transcription.service';
 import type {
@@ -298,6 +301,7 @@ async function main(): Promise<void> {
     const answerPassed =
       answerRes.status === 200 &&
       answerBody.matched === true &&
+      answerBody.answerMode === 'FAQ_GROUNDED' &&
       Array.isArray(answerBody.faqIds) &&
       answerBody.faqIds.length > 0 &&
       answerBody.answer.includes('09:00') &&
@@ -308,7 +312,7 @@ async function main(): Promise<void> {
       name: 'POST /api/answer (Transcript -> Grounded FAQ Answer)',
       status: answerPassed ? 'PASS' : 'FAIL',
       latencyMs: answerLatencyMs,
-      evidence: `HTTP ${answerRes.status}, matched=${answerBody.matched}, faqIds=${JSON.stringify(answerBody.faqIds)}, answer="${answerBody.answer ?? ''}"`,
+      evidence: `HTTP ${answerRes.status}, matched=${answerBody.matched}, answerMode=${answerBody.answerMode}, faqIds=${JSON.stringify(answerBody.faqIds)}, answer="${answerBody.answer ?? ''}"`,
       error: answerPassed ? undefined : JSON.stringify(answerBody),
     });
 
@@ -505,7 +509,7 @@ async function main(): Promise<void> {
       `LongTranscript=${longTrRes.status}(${longTrJson.error?.code})`,
     );
 
-    // 4f. Question outside FAQs -> 200 deterministic fallback without LLM call
+    // 4f. Question outside FAQs -> 200 Context-Aware Guarded AI response (no fabricated prices)
     const noMatchStart = Date.now();
     const noMatchRes = await fetch(`${baseUrl}/api/answer`, {
       method: 'POST',
@@ -518,10 +522,13 @@ async function main(): Promise<void> {
       noMatchRes.status === 200 &&
       noMatchJson.matched === false &&
       noMatchJson.faqIds.length === 0 &&
-      noMatchJson.answer === NO_MATCH_FALLBACK_ANSWER;
+      (noMatchJson.answerMode === 'ORGANIZATION_INFO_UNKNOWN' ||
+        noMatchJson.answerMode === 'GENERAL_GUIDANCE') &&
+      Boolean(noMatchJson.answer) &&
+      !hasUnsupportedFabricatedClaims(noMatchJson.answer);
     if (!noMatchOk) allNegativesPassed = false;
     negativeDetails.push(
-      `NoMatchFallback=${noMatchRes.status}(matched=${noMatchJson.matched}, ${noMatchLatency}ms)`,
+      `NoMatchGuarded=${noMatchRes.status}(matched=${noMatchJson.matched}, mode=${noMatchJson.answerMode}, fallbackConst=${Boolean(NO_MATCH_FALLBACK_ANSWER)}, ${noMatchLatency}ms)`,
     );
 
     // 4g. Empty TTS text -> 400

@@ -1,10 +1,13 @@
 'use client';
 
+import type { AnswerMode } from '@/types/api';
+
 interface ConversationPanelProps {
   transcript: string;
   answer: string;
   matchedFaqIds: number[];
   matched: boolean | null;
+  answerMode?: AnswerMode | null;
   errorMessage: string | null;
   canRetry: boolean;
   onRetry: () => void;
@@ -18,15 +21,56 @@ const DEMO_SAMPLE_QUESTIONS = [
   'ติดต่อใครเมื่อไม่มีคำตอบ',
 ] as const;
 
+function getAnswerModePresentation(
+  matched: boolean | null,
+  answerMode: AnswerMode | null | undefined,
+  matchedFaqIds: number[],
+): { label: string; className: string } | null {
+  if (matched === null && !answerMode) {
+    return null;
+  }
+
+  const effectiveMode: AnswerMode =
+    answerMode ?? (matched ? 'FAQ_GROUNDED' : 'ORGANIZATION_INFO_UNKNOWN');
+
+  if (effectiveMode === 'FAQ_GROUNDED') {
+    const idSuffix =
+      matchedFaqIds.length > 0 ? ` (#${matchedFaqIds.join(', #')})` : '';
+    return {
+      label: `อ้างอิงข้อมูล FAQ${idSuffix}`,
+      className: 'bg-emerald-100 text-emerald-800',
+    };
+  }
+
+  if (effectiveMode === 'GENERAL_GUIDANCE') {
+    return {
+      label: 'คำแนะนำทั่วไปจาก AI',
+      className: 'bg-sky-100 text-sky-800',
+    };
+  }
+
+  return {
+    label: 'ยังไม่มีข้อมูลเฉพาะหน่วยงาน',
+    className: 'bg-amber-100 text-amber-900',
+  };
+}
+
 export function ConversationPanel({
   transcript,
   answer,
   matchedFaqIds,
   matched,
+  answerMode,
   errorMessage,
   canRetry,
   onRetry,
 }: ConversationPanelProps) {
+  const modePresentation = getAnswerModePresentation(
+    matched,
+    answerMode,
+    matchedFaqIds,
+  );
+
   return (
     <div className="flex w-full flex-col gap-4">
       {/* Error Banner */}
@@ -78,18 +122,16 @@ export function ConversationPanel({
           <p className="text-xs font-semibold tracking-wide text-sky-800 uppercase">
             คำตอบจากมาสคอต AI (Answer)
           </p>
-          {matched !== null && (
+          {modePresentation && (
             <span
               data-testid="faq-match-badge"
-              className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                matched
-                  ? 'bg-emerald-100 text-emerald-800'
-                  : 'bg-slate-200 text-slate-700'
-              }`}
+              data-answer-mode={
+                answerMode ??
+                (matched ? 'FAQ_GROUNDED' : 'ORGANIZATION_INFO_UNKNOWN')
+              }
+              className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${modePresentation.className}`}
             >
-              {matched
-                ? `อ้างอิง FAQ #${matchedFaqIds.join(', #')}`
-                : 'ไม่พบใน FAQ สาธิต (Fallback)'}
+              {modePresentation.label}
             </span>
           )}
         </div>

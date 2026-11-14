@@ -7,10 +7,14 @@ export interface SttResponse {
   transcript: string;
 }
 
+export type AnswerMode =
+  'FAQ_GROUNDED' | 'GENERAL_GUIDANCE' | 'ORGANIZATION_INFO_UNKNOWN';
+
 export interface AnswerResponse {
   answer: string;
   faqIds: number[];
   matched: boolean;
+  answerMode?: AnswerMode;
 }
 
 export type ApiErrorCode =

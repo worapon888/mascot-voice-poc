@@ -1,5 +1,7 @@
 'use client';
 
+import { useEyeBlink } from '@/hooks/use-eye-blink';
+import { useHandGesture } from '@/hooks/use-hand-gesture';
 import type { MouthFrame, VoiceState } from '@/types/voice';
 import { VOICE_STATE_LABELS } from '@/types/voice';
 
@@ -34,6 +36,9 @@ export function MascotAvatar({
   mouthFrame,
   amplitude,
 }: MascotAvatarProps) {
+  const isBlinking = useEyeBlink();
+  const handGesture = useHandGesture(voiceState);
+
   // Strictly keep mouth closed whenever not actively in 'speaking' state
   const effectiveMouth: MouthFrame =
     voiceState === 'speaking' ? mouthFrame : 'closed';
@@ -61,6 +66,9 @@ export function MascotAvatar({
       <div
         data-testid="mascot-stage"
         data-mouth-frame={effectiveMouth}
+        data-blinking={isBlinking ? 'true' : 'false'}
+        data-hand-gesturing={handGesture.isGesturing ? 'true' : 'false'}
+        data-hand-angle={handGesture.rotationDeg}
         className="relative flex h-64 w-72 items-end justify-center overflow-hidden rounded-3xl border border-sky-200/80 bg-linear-to-b from-[#b5ddfb] to-[#dbf3ff] shadow-md sm:h-72 sm:w-80"
       >
         {/* Subtle speaking aura ring */}
@@ -73,53 +81,120 @@ export function MascotAvatar({
 
         {/* Fixed aspect-ratio sprite stack (168x151 original cutout dimensions) */}
         <div className="relative aspect-[168/151] w-[88%] select-none">
-          {/* Frame 1: Closed Mouth (Idle / Silent) */}
+          {/* Base Mascot Body & Mouth Frames (with static forearm masked out to prevent duplicate arm) */}
+          <div
+            data-testid="mascot-body-mask-layer"
+            className="absolute inset-0 h-full w-full"
+            style={{
+              WebkitMaskImage:
+                "url('/assets/mascot/mascot-original-body-mask.png')",
+              maskImage: "url('/assets/mascot/mascot-original-body-mask.png')",
+              WebkitMaskSize: '100% 100%',
+              maskSize: '100% 100%',
+              WebkitMaskRepeat: 'no-repeat',
+              maskRepeat: 'no-repeat',
+            }}
+          >
+            {/* Frame 1: Closed Mouth (Idle / Silent) */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/assets/mascot/mascot-original-idle.png"
+              alt="มาสคอต 2D ต้นฉบับ (สถานะปิดปาก)"
+              width={168}
+              height={151}
+              draggable={false}
+              data-testid="mascot-img-closed"
+              className={`absolute inset-0 h-full w-full object-contain ${
+                effectiveMouth === 'closed'
+                  ? 'opacity-100'
+                  : 'pointer-events-none opacity-0'
+              }`}
+            />
+
+            {/* Frame 2: Small Open Mouth (Low/Mid Speech Amplitude) */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/assets/mascot/mascot-original-small.png"
+              alt="มาสคอต 2D ต้นฉบับ (สถานะขยับปากเล็กน้อย)"
+              width={168}
+              height={151}
+              draggable={false}
+              data-testid="mascot-img-small"
+              className={`absolute inset-0 h-full w-full object-contain ${
+                effectiveMouth === 'small'
+                  ? 'opacity-100'
+                  : 'pointer-events-none opacity-0'
+              }`}
+            />
+
+            {/* Frame 3: Full Open Mouth (High Speech Amplitude) */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/assets/mascot/mascot-original-talking.png"
+              alt="มาสคอต 2D ต้นฉบับ (สถานะอ้าปากพูด)"
+              width={168}
+              height={151}
+              draggable={false}
+              data-testid="mascot-img-open"
+              className={`absolute inset-0 h-full w-full object-contain ${
+                effectiveMouth === 'open'
+                  ? 'opacity-100'
+                  : 'pointer-events-none opacity-0'
+              }`}
+            />
+          </div>
+
+          {/* Separate Original Forearm/Hand Layer with Elbow Pivot (121.5, 139.0 in 168x151 space) */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src="/assets/mascot/mascot-original-idle.png"
-            alt="มาสคอต 2D ต้นฉบับ (สถานะปิดปาก)"
+            src="/assets/mascot/mascot-original-arm.png"
+            alt=""
+            aria-hidden="true"
             width={168}
             height={151}
             draggable={false}
-            data-testid="mascot-img-closed"
-            className={`absolute inset-0 h-full w-full object-contain ${
-              effectiveMouth === 'closed'
-                ? 'opacity-100'
-                : 'pointer-events-none opacity-0'
-            }`}
+            data-testid="mascot-arm-layer"
+            data-hand-gesturing={handGesture.isGesturing ? 'true' : 'false'}
+            data-hand-angle={handGesture.rotationDeg}
+            className="pointer-events-none absolute inset-0 h-full w-full object-contain ease-in-out will-change-transform"
+            style={{
+              transformOrigin: '72.32% 92.05%',
+              transform: `rotate(${handGesture.rotationDeg}deg)`,
+              transitionProperty: 'transform',
+              transitionDuration: `${handGesture.transitionDurationMs}ms`,
+            }}
           />
 
-          {/* Frame 2: Small Open Mouth (Low/Mid Speech Amplitude) */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/assets/mascot/mascot-original-small.png"
-            alt="มาสคอต 2D ต้นฉบับ (สถานะขยับปากเล็กน้อย)"
-            width={168}
-            height={151}
-            draggable={false}
-            data-testid="mascot-img-small"
-            className={`absolute inset-0 h-full w-full object-contain ${
-              effectiveMouth === 'small'
-                ? 'opacity-100'
-                : 'pointer-events-none opacity-0'
+          {/* Eye-Only Blink Overlay aligned to original 168x151 pixel coordinates */}
+          <svg
+            viewBox="0 0 168 151"
+            aria-hidden="true"
+            data-testid="mascot-eye-blink-overlay"
+            data-eye-state={isBlinking ? 'closed' : 'open'}
+            className={`pointer-events-none absolute inset-0 h-full w-full transition-opacity duration-75 ${
+              isBlinking ? 'opacity-100' : 'opacity-0'
             }`}
-          />
+          >
+            {/* Skin-tone patches covering only the left (x:63..75, y:70..89) and right (x:104..115, y:68..86) open eyes */}
+            <ellipse cx="69.2" cy="79.8" rx="6.8" ry="10.1" fill="#fff7ec" />
+            <ellipse cx="109.5" cy="77.2" rx="6.4" ry="9.7" fill="#fff7ec" />
 
-          {/* Frame 3: Full Open Mouth (High Speech Amplitude) */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/assets/mascot/mascot-original-talking.png"
-            alt="มาสคอต 2D ต้นฉบับ (สถานะอ้าปากพูด)"
-            width={168}
-            height={151}
-            draggable={false}
-            data-testid="mascot-img-open"
-            className={`absolute inset-0 h-full w-full object-contain ${
-              effectiveMouth === 'open'
-                ? 'opacity-100'
-                : 'pointer-events-none opacity-0'
-            }`}
-          />
+            {/* Closed eyelid curves matching original outline color (#10314d) and slight head tilt */}
+            <path
+              d="M 63.8 80.6 Q 69.2 84.2 74.6 80.2"
+              fill="none"
+              stroke="#10314d"
+              strokeWidth="2.6"
+              strokeLinecap="round"
+            />
+            <path
+              d="M 104.3 78.0 Q 109.5 81.6 114.6 77.6"
+              fill="none"
+              stroke="#10314d"
+              strokeWidth="2.6"
+              strokeLinecap="round"
+            />
+          </svg>
         </div>
       </div>
 

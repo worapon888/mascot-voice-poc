@@ -15,6 +15,7 @@ import {
   requestSpeechToText,
   requestTextToSpeechBlob,
 } from '@/lib/voice/api-client';
+import type { AnswerMode } from '@/types/api';
 import type { VoiceState } from '@/types/voice';
 
 export function VoiceChat() {
@@ -23,6 +24,7 @@ export function VoiceChat() {
   const [answer, setAnswer] = useState<string>('');
   const [matchedFaqIds, setMatchedFaqIds] = useState<number[]>([]);
   const [matched, setMatched] = useState<boolean | null>(null);
+  const [answerMode, setAnswerMode] = useState<AnswerMode | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const [hasRetryPayload, setHasRetryPayload] = useState<boolean>(false);
@@ -87,6 +89,12 @@ export function VoiceChat() {
         setAnswer(answerResult.answer);
         setMatchedFaqIds(answerResult.faqIds);
         setMatched(answerResult.matched);
+        setAnswerMode(
+          answerResult.answerMode ??
+            (answerResult.matched
+              ? 'FAQ_GROUNDED'
+              : 'ORGANIZATION_INFO_UNKNOWN'),
+        );
 
         // Step C: Text-to-Speech (/api/tts)
         setVoiceState('synthesizing');
@@ -316,6 +324,7 @@ export function VoiceChat() {
         answer={answer}
         matchedFaqIds={matchedFaqIds}
         matched={matched}
+        answerMode={answerMode}
         errorMessage={errorMessage}
         canRetry={voiceState === 'error' && hasRetryPayload}
         onRetry={handleRetry}

@@ -109,12 +109,20 @@ OPENAI_TIMEOUT_MS=30000
 
 ---
 
-## 7. API Endpoints
+## 7. API Endpoints & Answer Modes
 
 - **`GET /api/health`** — Returns `{ "status": "ok", "service": "mascot-voice-poc" }`
 - **`POST /api/stt`** — `multipart/form-data` (`audio`, max 3 MB) → `{ "transcript": "..." }`
-- **`POST /api/answer`** — `application/json` (`{ "transcript": "..." }`) → `{ "answer": "...", "faqIds": [1], "matched": true }`
+- **`POST /api/answer`** — `application/json` (`{ "transcript": "..." }`) → `{ "answer": "...", "faqIds": [1], "matched": true, "answerMode": "FAQ_GROUNDED" }`
 - **`POST /api/tts`** — `application/json` (`{ "text": "..." }`) → Binary `audio/mpeg` (`Cache-Control: no-store`)
+
+### Context-Aware Answer Modes (`POST /api/answer`)
+
+1. **`FAQ_GROUNDED`** (`matched: true`, `faqIds: [...]`): Used when the question matches active Supabase FAQ records. Preserves verified factual details without inventing additional organizational facts.
+2. **`GENERAL_GUIDANCE`** (`matched: false`, `faqIds: []`): Used when no FAQ matches, but `gpt-4.1-mini` can provide safe, practical general guidance or clarify assistant boundaries without inventing organization-specific facts, locations, or laws.
+3. **`ORGANIZATION_INFO_UNKNOWN`** (`matched: false`, `faqIds: []`): Used when the question requires unavailable organization-specific facts (e.g., floor numbers, parking locations, service fees, or staff names). Clearly admits what is unknown and suggests practical next steps. Falls back to a deterministic static response only if the LLM fails or violates anti-fabrication guardrails.
+
+> **API Cost & Scope Note (Monday POC Plan Update Required)**: Unmatched questions now invoke a single bounded `gpt-4.1-mini` call (`max_output_tokens: 220`, `maxRetries: 0`) to classify and generate helpful Thai guidance instead of immediately returning a static string. The Google Docs Monday POC plan (`A07` acceptance criterion) must be updated to reflect this explicit scope upgrade (`No match → bounded AI guidance or explicit unknown-information response → deterministic safety fallback only when necessary`).
 
 ---
 
@@ -123,4 +131,5 @@ OPENAI_TIMEOUT_MS=30000
 - [x] **Prompt 1**: Project Setup, TypeScript Strict Mode, ESLint, Prettier, Husky, `lint-staged`
 - [x] **Prompt 2**: Supabase PostgreSQL Schema & 5 Demo FAQs, Repository, G0 Smoke Tests (`9/9 PASSED`)
 - [x] **Prompt 3**: Backend Voice Pipeline (`/api/stt`, `/api/answer`, `/api/tts`) & HTTP Integration Tests (`7/7 PASSED`)
-- [x] **Prompt 4**: Original 2D Mascot Assets imported (`public/assets/mascot/`), Voice Interaction State Machine, `MediaRecorder` hook, Web Audio API RMS Lip-Sync hook, and Thai Frontend UI
+- [x] **Prompt 4 & 5**: Original 2D Mascot Assets (`public/assets/mascot/`), Voice Interaction State Machine, `MediaRecorder` hook, Web Audio API RMS Lip-Sync hook, and Google Chrome E2E verification
+- [x] **Context-Aware Guarded AI Upgrade**: 3 explicit answer modes (`FAQ_GROUNDED`, `GENERAL_GUIDANCE`, `ORGANIZATION_INFO_UNKNOWN`) with structured JSON validation and anti-fabrication guardrails
