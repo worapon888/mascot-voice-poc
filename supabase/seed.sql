@@ -1,0 +1,2 @@
+-- Supabase PostgreSQL seed data for mascot-voice-poc
+-- Initial Thai Q&A knowledge base entries will be added in the database integration phase.

@@ -1,0 +1,2 @@
+-- Supabase PostgreSQL schema for mascot-voice-poc
+-- Database tables and indexes will be defined in the database integration phase.
