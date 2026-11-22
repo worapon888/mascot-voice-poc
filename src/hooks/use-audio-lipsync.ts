@@ -226,7 +226,10 @@ export function useAudioLipsync() {
   );
 
   const playAudioBlob = useCallback(
-    async (mp3Blob: Blob): Promise<PlayAudioOutcome> => {
+    async (
+      mp3Blob: Blob,
+      onPlayStarted?: () => void,
+    ): Promise<PlayAudioOutcome> => {
       stopAudio(true);
 
       const { audio, context, analyser } = ensureAudioGraph();
@@ -272,6 +275,7 @@ export function useAudioLipsync() {
           .play()
           .then(() => {
             setIsPlaying(true);
+            onPlayStarted?.();
             startAmplitudeSampling(audio, analyser);
           })
           .catch((err: unknown) => {

@@ -7,6 +7,36 @@ const FAQ_SELECT_COLUMNS =
   'id, question, answer, keywords, is_active, created_at';
 const MAX_POC_FAQ_LIMIT = 10;
 
+interface CachedActiveFaqs {
+  records: FaqRecord[];
+  cachedAt: number;
+}
+
+let activeFaqsCache: CachedActiveFaqs | null = null;
+export const ACTIVE_FAQS_CACHE_TTL_MS = 60_000; // 60s TTL
+
+export function resetActiveFaqsCacheForTesting(): void {
+  activeFaqsCache = null;
+}
+
+export function getActiveFaqsCacheStats(): {
+  cached: boolean;
+  ageMs?: number;
+  count?: number;
+} {
+  if (
+    activeFaqsCache &&
+    Date.now() - activeFaqsCache.cachedAt < ACTIVE_FAQS_CACHE_TTL_MS
+  ) {
+    return {
+      cached: true,
+      ageMs: Date.now() - activeFaqsCache.cachedAt,
+      count: activeFaqsCache.records.length,
+    };
+  }
+  return { cached: false };
+}
+
 export class FaqRepositoryError extends Error {
   public readonly code: string;
 
@@ -18,13 +48,25 @@ export class FaqRepositoryError extends Error {
 }
 
 /**
- * Retrieves active FAQs from Supabase PostgreSQL.
+ * Retrieves active FAQs from Supabase PostgreSQL with in-memory caching (60s TTL).
  * Enforces a maximum limit of 10 records for the POC.
  */
 export async function getActiveFaqs(
   limit: number = MAX_POC_FAQ_LIMIT,
+  options: { bypassCache?: boolean } = {},
 ): Promise<FaqRecord[]> {
   const safeLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_POC_FAQ_LIMIT);
+  const now = Date.now();
+
+  if (
+    !options.bypassCache &&
+    activeFaqsCache &&
+    now - activeFaqsCache.cachedAt < ACTIVE_FAQS_CACHE_TTL_MS &&
+    activeFaqsCache.records.length <= safeLimit
+  ) {
+    return activeFaqsCache.records.slice(0, safeLimit);
+  }
+
   const supabase = getSupabaseServerClient();
 
   const { data, error } = await supabase
@@ -41,7 +83,13 @@ export async function getActiveFaqs(
     );
   }
 
-  return (data ?? []) as FaqRecord[];
+  const records = (data ?? []) as FaqRecord[];
+  activeFaqsCache = {
+    records,
+    cachedAt: now,
+  };
+
+  return records;
 }
 
 /**
@@ -117,6 +165,7 @@ export async function setFaqActiveStatus(
     );
   }
 
+  activeFaqsCache = null;
   return data as FaqRecord;
 }
 
@@ -144,5 +193,6 @@ export async function updateFaqAnswer(
     );
   }
 
+  activeFaqsCache = null;
   return data as FaqRecord;
 }

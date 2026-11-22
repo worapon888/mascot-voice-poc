@@ -55,6 +55,10 @@ export async function POST(
         'X-Persistent-Audio-Lookup-Ms': String(
           metrics.persistentAudioLookupLatencyMs,
         ),
+        'X-FAQ-Cache': metrics.faqCacheHit ? 'HIT' : 'MISS',
+        'X-Persistent-Audio-Cache': metrics.persistentAudioCacheHit
+          ? 'HIT'
+          : 'MISS',
       },
     });
   } catch (error) {

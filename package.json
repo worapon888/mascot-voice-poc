@@ -17,6 +17,7 @@
     "test:handsfree": "node --import=./src/scripts/register-paths.mjs src/scripts/handsfree-phase1.test.ts",
     "test:handsfree-phase2": "node --import=./src/scripts/register-paths.mjs src/scripts/handsfree-phase2.test.ts",
     "test:three-tier": "node --import=./src/scripts/register-paths.mjs src/scripts/three-tier-response.test.ts",
+    "test:latency-optimization": "node --import=./src/scripts/register-paths.mjs src/scripts/latency-optimization.test.ts",
     "faq-audio:dry-run": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/generate-faq-audio.ts",
     "faq-audio:generate": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/generate-faq-audio.ts --execute",
     "smoke:g0": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/g0-smoke.ts",

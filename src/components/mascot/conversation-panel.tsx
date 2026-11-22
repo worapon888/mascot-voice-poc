@@ -18,6 +18,14 @@ interface ConversationPanelProps {
     byteSize: number;
     durationSeconds: number;
     audioUrl?: string;
+    timings?: {
+      speechEndToVadCommitMs?: number;
+      vadCommitToSttMs?: number;
+      sttToAnswerMs?: number;
+      answerToAudioReadyMs?: number;
+      audioReadyToPlaybackMs?: number;
+      totalSpeechEndToPlaybackMs?: number;
+    };
   } | null;
 }
 
@@ -192,6 +200,67 @@ export function ConversationPanel({
                   src={diagnostics.audioUrl}
                   className="h-7 w-full max-w-[260px]"
                 />
+              </div>
+            )}
+            {diagnostics.timings && (
+              <div className="mt-2 border-t border-indigo-200/60 pt-2 text-[11px] text-indigo-900">
+                <span className="font-semibold text-indigo-700">
+                  ⚡ Timing Breakdown:
+                </span>
+                <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+                  {diagnostics.timings.speechEndToVadCommitMs !== undefined && (
+                    <div>
+                      VAD Commit:{' '}
+                      <span className="font-mono font-semibold">
+                        {diagnostics.timings.speechEndToVadCommitMs}ms
+                      </span>
+                    </div>
+                  )}
+                  {diagnostics.timings.vadCommitToSttMs !== undefined && (
+                    <div>
+                      STT:{' '}
+                      <span className="font-mono font-semibold">
+                        {diagnostics.timings.vadCommitToSttMs}ms
+                      </span>
+                    </div>
+                  )}
+                  {diagnostics.timings.sttToAnswerMs !== undefined && (
+                    <div>
+                      Answer:{' '}
+                      <span className="font-mono font-semibold">
+                        {diagnostics.timings.sttToAnswerMs}ms
+                      </span>
+                    </div>
+                  )}
+                  {diagnostics.timings.answerToAudioReadyMs !== undefined && (
+                    <div>
+                      Audio Ready:{' '}
+                      <span className="font-mono font-semibold">
+                        {diagnostics.timings.answerToAudioReadyMs}ms
+                      </span>
+                    </div>
+                  )}
+                  {diagnostics.timings.audioReadyToPlaybackMs !== undefined && (
+                    <div>
+                      Playback Start:{' '}
+                      <span className="font-mono font-semibold">
+                        {diagnostics.timings.audioReadyToPlaybackMs}ms
+                      </span>
+                    </div>
+                  )}
+                  {diagnostics.timings.totalSpeechEndToPlaybackMs !==
+                    undefined && (
+                    <div className="col-span-2 font-bold text-emerald-800 sm:col-span-1">
+                      Total E2E:{' '}
+                      <span className="font-mono">
+                        {(
+                          diagnostics.timings.totalSpeechEndToPlaybackMs / 1000
+                        ).toFixed(2)}
+                        s
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

@@ -13,6 +13,7 @@ import {
   appendCompletedTurnToHistory,
   ClientVoiceError,
   executeSmartPipelineStages,
+  preloadPersistentFaqAudios,
   type RetrySessionSnapshot,
 } from '@/lib/voice/api-client';
 import { evaluateKioskAutoStart } from '@/lib/voice/vad-engine';
@@ -60,6 +61,14 @@ export function VoiceChat() {
     byteSize: number;
     durationSeconds: number;
     audioUrl?: string;
+    timings?: {
+      speechEndToVadCommitMs?: number;
+      vadCommitToSttMs: number;
+      sttToAnswerMs: number;
+      answerToAudioReadyMs: number;
+      audioReadyToPlaybackMs?: number;
+      totalSpeechEndToPlaybackMs?: number;
+    };
   } | null>(null);
 
   const turnIdRef = useRef<number>(0);
@@ -196,11 +205,42 @@ export function VoiceChat() {
         }
 
         // Step D: Audio Playback + Real Web Audio API Lip-Sync + Smart Barge-in Monitoring
+        const tAudioReady = performance.now();
         setVoiceState('speaking');
         if (isHandsFreeActiveRef.current) {
           startHandsFreeBargeInFnRef.current();
         }
-        const outcome = await playAudioBlob(ttsBlob);
+
+        const outcome = await playAudioBlob(ttsBlob, () => {
+          const tPlaybackStarted = performance.now();
+          const speechEndMs = recordingPayload.vadTimings?.speechEndMs;
+          const vadCommitMs = recordingPayload.vadTimings?.vadCommitMs;
+          const speechEndToVad =
+            speechEndMs !== undefined && vadCommitMs !== undefined
+              ? Math.round(vadCommitMs - speechEndMs)
+              : undefined;
+          const audioReadyToPlay = Math.round(tPlaybackStarted - tAudioReady);
+          const totalE2E =
+            speechEndMs !== undefined
+              ? Math.round(tPlaybackStarted - speechEndMs)
+              : undefined;
+
+          setLastDiagnostics((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  timings: {
+                    speechEndToVadCommitMs: speechEndToVad,
+                    vadCommitToSttMs: stageResult.stageLatenciesMs.sttMs,
+                    sttToAnswerMs: stageResult.stageLatenciesMs.answerMs,
+                    answerToAudioReadyMs: stageResult.stageLatenciesMs.ttsMs,
+                    audioReadyToPlaybackMs: audioReadyToPlay,
+                    totalSpeechEndToPlaybackMs: totalE2E,
+                  },
+                }
+              : prev,
+          );
+        });
         if (currentTurnId !== turnIdRef.current) {
           return;
         }
@@ -484,6 +524,14 @@ export function VoiceChat() {
       });
     };
   }, [abortActiveRequest, stopAudio]);
+
+  useEffect(() => {
+    // Non-blocking background preload of active persistent FAQ audios into client cache
+    const timer = setTimeout(() => {
+      preloadPersistentFaqAudios().catch(() => {});
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleStartPrimaryAction = useCallback(async () => {
     turnIdRef.current += 1;

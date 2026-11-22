@@ -310,8 +310,71 @@ export async function requestTextToSpeechBlob(
   return new Blob([arrayBuffer], { type: 'audio/mpeg' });
 }
 
+const persistentAudioBlobClientCache = new Map<string, Blob>();
+
+export function clearPersistentAudioClientCache(): void {
+  persistentAudioBlobClientCache.clear();
+}
+
+export function getPersistentAudioClientCacheStats(): {
+  size: number;
+  urls: string[];
+} {
+  return {
+    size: persistentAudioBlobClientCache.size,
+    urls: Array.from(persistentAudioBlobClientCache.keys()),
+  };
+}
+
 /**
- * Fetches a pre-generated persistent FAQ MP3 Blob directly from Supabase Storage by URL.
+ * Preloads all currently active FAQ persistent audios + fallback audio into client memory.
+ * Runs in background without blocking audio/mic or autoplay policies.
+ */
+export async function preloadPersistentFaqAudios(
+  signal?: AbortSignal,
+): Promise<{ preloadedCount: number; errors: number }> {
+  try {
+    const res = await fetch('/api/faq-audio/manifest', {
+      method: 'GET',
+      signal,
+    });
+    if (!res.ok) {
+      return { preloadedCount: 0, errors: 1 };
+    }
+    const data = (await res.json()) as {
+      audios?: Array<{ audioUrl: string; faqId: number }>;
+    };
+    if (!Array.isArray(data.audios)) {
+      return { preloadedCount: 0, errors: 0 };
+    }
+
+    let preloadedCount = 0;
+    let errors = 0;
+
+    await Promise.allSettled(
+      data.audios.map(async (item) => {
+        if (!item.audioUrl) return;
+        if (persistentAudioBlobClientCache.has(item.audioUrl)) {
+          preloadedCount += 1;
+          return;
+        }
+        try {
+          await requestPersistentAudioBlob(item.audioUrl, signal);
+          preloadedCount += 1;
+        } catch {
+          errors += 1;
+        }
+      }),
+    );
+
+    return { preloadedCount, errors };
+  } catch {
+    return { preloadedCount: 0, errors: 1 };
+  }
+}
+
+/**
+ * Fetches a pre-generated persistent FAQ MP3 Blob directly from Supabase Storage by URL (with in-memory client caching).
  * Validates binary size and MPEG/ID3 header so corrupted or missing files safely trigger
  * the dynamic `/api/tts` fallback without breaking Web Audio API lip-sync.
  */
@@ -319,6 +382,11 @@ export async function requestPersistentAudioBlob(
   audioUrl: string,
   signal?: AbortSignal,
 ): Promise<Blob> {
+  const cached = persistentAudioBlobClientCache.get(audioUrl);
+  if (cached) {
+    return cached;
+  }
+
   const response = await fetch(audioUrl, {
     method: 'GET',
     mode: 'cors',
@@ -348,7 +416,9 @@ export async function requestPersistentAudioBlob(
     );
   }
 
-  return new Blob([arrayBuffer], { type: 'audio/mpeg' });
+  const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+  persistentAudioBlobClientCache.set(audioUrl, blob);
+  return blob;
 }
 
 export interface RetrySessionSnapshot {
@@ -356,6 +426,12 @@ export interface RetrySessionSnapshot {
     blob: Blob;
     mimeType: string;
     durationSeconds: number;
+    vadTimings?: {
+      speechEndMs: number;
+      vadCommitMs: number;
+      silenceWaitMs: number;
+      wavEncodeMs: number;
+    };
   };
   transcript: string | null;
   answerResult: AnswerResponse | null;
@@ -386,6 +462,13 @@ export interface SmartPipelineStageResult {
     sttMs: number;
     answerMs: number;
     ttsMs: number;
+  };
+  timingBreakdown: {
+    speechEndToVadCommitMs?: number;
+    vadCommitToSttMs: number;
+    sttToAnswerMs: number;
+    answerToAudioReadyMs: number;
+    totalProcessingMs: number;
   };
   apiCallsMade: {
     stt: number;
@@ -420,6 +503,7 @@ export async function executeSmartPipelineStages(
     persistentAudioFn = requestPersistentAudioBlob,
   } = options;
 
+  const tPipelineStart = performance.now();
   const hasMatchingSession =
     existingSession !== null &&
     existingSession !== undefined &&
@@ -543,11 +627,26 @@ export async function executeSmartPipelineStages(
     session.ttsBlob = activeTtsBlob;
   }
 
+  const tPipelineEnd = performance.now();
+  const timingBreakdown = {
+    speechEndToVadCommitMs: recordingPayload.vadTimings
+      ? Math.round(
+          recordingPayload.vadTimings.vadCommitMs -
+            recordingPayload.vadTimings.speechEndMs,
+        )
+      : undefined,
+    vadCommitToSttMs: stageLatenciesMs.sttMs,
+    sttToAnswerMs: stageLatenciesMs.answerMs,
+    answerToAudioReadyMs: stageLatenciesMs.ttsMs,
+    totalProcessingMs: Math.round(tPipelineEnd - tPipelineStart),
+  };
+
   return {
     session,
     ttsBlob: activeTtsBlob,
     audioSource,
     stageLatenciesMs,
+    timingBreakdown,
     apiCallsMade,
   };
 }

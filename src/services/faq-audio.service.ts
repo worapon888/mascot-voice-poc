@@ -51,6 +51,32 @@ const inFlightFaqAudioJobs = new Map<
   Promise<FaqAudioGenerationOutcome>
 >();
 
+interface CachedPersistentFaqAudioEntry {
+  audioRef: PersistentFaqAudioReference;
+  cachedAt: number;
+}
+
+const persistentFaqAudioCache = new Map<
+  string,
+  CachedPersistentFaqAudioEntry
+>();
+export const PERSISTENT_FAQ_AUDIO_CACHE_TTL_MS = 60_000; // 60s TTL
+
+export function resetPersistentFaqAudioCacheForTesting(): void {
+  persistentFaqAudioCache.clear();
+  cachedFallbackAudioRef = null;
+}
+
+export function getPersistentAudioCacheStats(): {
+  entryCount: number;
+  keys: string[];
+} {
+  return {
+    entryCount: persistentFaqAudioCache.size,
+    keys: Array.from(persistentFaqAudioCache.keys()),
+  };
+}
+
 export function getPersistentAudioTelemetry(): PersistentAudioTelemetry {
   return { ...telemetry };
 }
@@ -64,6 +90,7 @@ export function resetPersistentAudioTelemetry(): void {
   telemetry.duplicateEventsSkipped = 0;
   telemetry.supersededVersionsSkipped = 0;
   inFlightFaqAudioJobs.clear();
+  persistentFaqAudioCache.clear();
 }
 
 /**
@@ -438,6 +465,24 @@ export async function resolvePersistentFaqAudioRef(
     };
   }
 
+  const cacheKey = `${faq.id}:${identity.contentHash}`;
+  if (!deps.storageAdapter) {
+    const cached = persistentFaqAudioCache.get(cacheKey);
+    if (
+      cached &&
+      Date.now() - cached.cachedAt < PERSISTENT_FAQ_AUDIO_CACHE_TTL_MS
+    ) {
+      telemetry.persistentAudioHits += 1;
+      return {
+        hit: true,
+        reason: 'READY_VERIFIED',
+        contentHash: identity.contentHash,
+        lookupLatencyMs: 0,
+        audioRef: cached.audioRef,
+      };
+    }
+  }
+
   const adapter = deps.storageAdapter ?? createSupabaseFaqAudioStorageAdapter();
 
   try {
@@ -479,20 +524,29 @@ export async function resolvePersistentFaqAudioRef(
       metadata.object_path,
     );
 
+    const audioRef: PersistentFaqAudioReference = {
+      faqId: faq.id,
+      contentHash: metadata.content_hash,
+      audioUrl,
+      objectPath: metadata.object_path,
+      mimeType: 'audio/mpeg',
+      byteLength: metadata.byte_length,
+    };
+
+    if (!deps.storageAdapter) {
+      persistentFaqAudioCache.set(cacheKey, {
+        audioRef,
+        cachedAt: Date.now(),
+      });
+    }
+
     telemetry.persistentAudioHits += 1;
     return {
       hit: true,
       reason: 'READY_VERIFIED',
       contentHash: identity.contentHash,
       lookupLatencyMs: Math.round(performance.now() - t0),
-      audioRef: {
-        faqId: faq.id,
-        contentHash: metadata.content_hash,
-        audioUrl,
-        objectPath: metadata.object_path,
-        mimeType: 'audio/mpeg',
-        byteLength: metadata.byte_length,
-      },
+      audioRef,
     };
   } catch (err) {
     telemetry.persistentAudioMisses += 1;

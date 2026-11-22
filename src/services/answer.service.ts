@@ -13,6 +13,7 @@ import {
   isConfidentOutOfScopeOrUnknownQuery,
   retrieveMatchingFaqs,
 } from '@/services/faq-matching.service';
+import { getActiveFaqsCacheStats } from '@/repositories/faq.repository';
 import type {
   AnswerMode,
   AnswerResponse,
@@ -43,6 +44,8 @@ export interface GroundedAnswerGenerationMetrics {
   persistentAudioStatus: 'HIT' | 'MISS' | 'SKIPPED';
   persistentAudioLookupLatencyMs: number;
   tier: ResponseTier;
+  faqCacheHit?: boolean;
+  persistentAudioCacheHit?: boolean;
 }
 
 export interface GroundedAnswerWithMetrics {
@@ -349,6 +352,9 @@ export async function generateGroundedAnswerWithMetrics(
           persistentAudioStatus: audioLookup.hit ? 'HIT' : 'MISS',
           persistentAudioLookupLatencyMs: audioLookup.lookupLatencyMs,
           tier: 'TIER_1',
+          faqCacheHit: getActiveFaqsCacheStats().cached,
+          persistentAudioCacheHit:
+            audioLookup.hit && audioLookup.lookupLatencyMs === 0,
         },
       };
     }
@@ -384,6 +390,9 @@ export async function generateGroundedAnswerWithMetrics(
         persistentAudioStatus: fallbackAudio.hit ? 'HIT' : 'MISS',
         persistentAudioLookupLatencyMs: fallbackAudio.lookupLatencyMs,
         tier: 'TIER_3',
+        faqCacheHit: getActiveFaqsCacheStats().cached,
+        persistentAudioCacheHit:
+          fallbackAudio.hit && fallbackAudio.lookupLatencyMs === 0,
       },
     };
   }
@@ -425,6 +434,10 @@ export async function generateGroundedAnswerWithMetrics(
         persistentAudioStatus,
         persistentAudioLookupLatencyMs,
         tier: 'TIER_2',
+        faqCacheHit: getActiveFaqsCacheStats().cached,
+        persistentAudioCacheHit:
+          persistentAudioStatus === 'HIT' &&
+          persistentAudioLookupLatencyMs === 0,
       },
     };
   }
@@ -523,6 +536,9 @@ export async function generateGroundedAnswerWithMetrics(
       persistentAudioStatus: tier2AudioStatus,
       persistentAudioLookupLatencyMs: tier2AudioLatencyMs,
       tier: 'TIER_2',
+      faqCacheHit: getActiveFaqsCacheStats().cached,
+      persistentAudioCacheHit:
+        tier2AudioStatus === 'HIT' && tier2AudioLatencyMs === 0,
     },
   };
 }

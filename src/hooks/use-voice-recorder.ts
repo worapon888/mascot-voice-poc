@@ -34,10 +34,18 @@ const PREFERRED_MIME_TYPES = [
 
 const RECORDER_TIMESLICE_MS = 100;
 
+export interface VadCommitTiming {
+  speechEndMs: number;
+  vadCommitMs: number;
+  silenceWaitMs: number;
+  wavEncodeMs: number;
+}
+
 export interface RecordedAudioPayload {
   blob: Blob;
   mimeType: string;
   durationSeconds: number;
+  vadTimings?: VadCommitTiming;
 }
 
 export interface AudioRecordingDiagnostics {
@@ -47,6 +55,7 @@ export interface AudioRecordingDiagnostics {
   durationSeconds: number;
   sampleRate: number;
   timestamp: number;
+  vadTimings?: VadCommitTiming;
 }
 
 export function detectSupportedRecordingMimeType(): string | null {
@@ -699,6 +708,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
           pcmCollectorRef.current = [];
 
           if (collected.length > 0) {
+            const tEncodeStart = performance.now();
             const rawPcm = mergeFloat32Arrays(collected);
             if (rawPcm.length > 0) {
               const targetSampleRate = 16_000;
@@ -708,6 +718,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
                 targetSampleRate,
               );
               const wavBytes = encodeWav(downsampled, targetSampleRate);
+              const tEncodeEnd = performance.now();
               const blob = new Blob([wavBytes.buffer as ArrayBuffer], {
                 type: 'audio/wav',
               });
@@ -717,6 +728,15 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
                 Math.round(downsampled.length / targetSampleRate),
               );
 
+              const silenceWaitMs = vadConfigRef.current.silenceEndOfTurnMs;
+              const vadTimings: VadCommitTiming = {
+                speechEndMs: Math.max(0, nowMs - silenceWaitMs),
+                vadCommitMs: nowMs,
+                silenceWaitMs,
+                wavEncodeMs:
+                  Math.round((tEncodeEnd - tEncodeStart) * 100) / 100,
+              };
+
               lastAudioDiagnosticsRef.current = {
                 source: 'hands-free-pcm-wav',
                 mimeType: 'audio/wav',
@@ -724,12 +744,14 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
                 durationSeconds,
                 sampleRate: targetSampleRate,
                 timestamp: Date.now(),
+                vadTimings,
               };
 
               onVadUtteranceCompleteRef.current?.({
                 blob,
                 mimeType: 'audio/wav',
                 durationSeconds,
+                vadTimings,
               });
 
               // Safely stop any background fallback MediaRecorder without triggering duplicate emission
