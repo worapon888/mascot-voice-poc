@@ -182,11 +182,11 @@ async function runTests(): Promise<void> {
         expectedDisqualifier: 'NEGATION_OR_CONDITION_SIGNAL',
       },
       {
-        query: 'สำนักงานปิดกี่โมงครับ',
+        query: 'เปิดบริการช่วงพักเที่ยงไหมครับ',
         expectedDisqualifier: 'REVERSE_OR_SPECIFIC_TIME_ANGLE',
       },
       {
-        query: 'วันเสาร์อาทิตย์เปิดไหมครับ',
+        query: 'เปิดทำการช่วงพักกลางวันไหมครับ',
         expectedDisqualifier: 'REVERSE_OR_SPECIFIC_TIME_ANGLE',
       },
       {

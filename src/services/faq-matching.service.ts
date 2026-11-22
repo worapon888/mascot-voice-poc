@@ -55,6 +55,22 @@ const TRAILING_POLITE_PARTICLES = [
   'จ๊ะ',
   'จ๋า',
   'ฮะ',
+  'บ้างล่ะครับ',
+  'บ้างล่ะค่ะ',
+  'บ้างล่ะคะ',
+  'บ้างล่ะ',
+  'บ้างครับ',
+  'บ้างค่ะ',
+  'บ้างคะ',
+  'ล่ะครับ',
+  'ล่ะค่ะ',
+  'ล่ะคะ',
+  'ล่ะ',
+  'ละครับ',
+  'ละค่ะ',
+  'ละ',
+  'นะ',
+  'น่ะ',
 ];
 
 /**
@@ -70,7 +86,89 @@ const TRAILING_QUESTION_MARKERS = [
   'ได้มั้ย',
   'ไหม',
   'มั้ย',
+  'หรือยัง',
+  'รึยัง',
+  'บ้าง',
+  'คืออะไร',
+  'อะไรบ้าง',
+  'มีอะไรบ้าง',
 ];
+
+/**
+ * Common spoken Thai conversational discourse prefixes stripped before semantic comparison.
+ */
+export const LEADING_CONVERSATIONAL_PREFIXES = [
+  'รบกวนสอบถามหน่อยว่า',
+  'รบกวนสอบถามว่า',
+  'รบกวนถามหน่อยว่า',
+  'รบกวนถามว่า',
+  'อยากสอบถามว่า',
+  'อยากทราบว่า',
+  'อยากรู้ว่า',
+  'ไม่ทราบว่า',
+  'สอบถามว่า',
+  'ถามหน่อยว่า',
+  'ถามว่า',
+  'แล้วมัน',
+  'แล้วถ้า',
+  'แล้วก็',
+  'แล้ว',
+  'งั้นก็',
+  'งั้น',
+  'เอ่อ',
+  'อ้าว',
+] as const;
+
+/**
+ * Locative and demonstrative discourse fillers indicating "at this venue/service point/branch".
+ * Stripped during semantic normalization so queries like "วันเสาร์ที่นี่เปิดหรือเปล่า"
+ * or "ที่นี่เปิดกี่โมง" resolve to "วันเสาร์เปิดหรือเปล่า" and "เปิดกี่โมง" without altering intent.
+ */
+const LOCATIVE_DEMONSTRATIVE_PATTERNS: readonly RegExp[] = [
+  /ที่จุดบริการนี้/gu,
+  /จุดบริการนี้/gu,
+  /ที่เคาน์เตอร์นี้/gu,
+  /เคาน์เตอร์นี้/gu,
+  /ที่สาขานี้/gu,
+  /สาขานี้/gu,
+  /ที่แห่งนี้/gu,
+  /แห่งนี้/gu,
+  /ที่นี่/gu,
+  /ตรงนี้/gu,
+  /จุดนี้/gu,
+];
+
+/**
+ * Removes locative demonstrative fillers (e.g. "ที่นี่", "สาขานี้", "จุดบริการนี้").
+ */
+export function stripLocativeDemonstratives(text: string): string {
+  let result = text;
+  for (const pattern of LOCATIVE_DEMONSTRATIVE_PATTERNS) {
+    result = result.replace(pattern, ' ');
+  }
+  return result.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Removes safe spoken discourse prefixes (conversational starters) while keeping the question intact.
+ */
+export function stripLeadingConversationalPrefixes(text: string): string {
+  let result = text.trim();
+  let changed = true;
+
+  while (changed && result.length > 0) {
+    changed = false;
+    for (const prefix of LEADING_CONVERSATIONAL_PREFIXES) {
+      if (result.startsWith(prefix) && result.length > prefix.length) {
+        result = result.slice(prefix.length).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return result;
+}
 
 /**
  * Supplemental domain phrase aliases mapped to canonical FAQ questions.
@@ -79,7 +177,10 @@ const TRAILING_QUESTION_MARKERS = [
 const SUPPLEMENTAL_ALIASES_BY_QUESTION: Record<string, string[]> = {
   เปิดบริการกี่โมง: [
     'เปิดวันไหน',
+    'เปิดวันไหนบ้าง',
     'เปิดวันอะไร',
+    'เปิดทำการวันไหน',
+    'เปิดให้บริการวันไหน',
     'ปิดกี่โมง',
     'ปิดบริการ',
     'ปิดบริการกี่โมง',
@@ -88,16 +189,22 @@ const SUPPLEMENTAL_ALIASES_BY_QUESTION: Record<string, string[]> = {
     'สำนักงานปิดกี่โมง',
     'เวลาเปิด',
     'เวลาปิด',
+    'เวลาปิดบริการ',
     'เปิดทำการ',
     'เปิดทำการกี่โมง',
     'เปิดถึงกี่โมง',
     'กี่โมงถึงกี่โมง',
+    'เวลาทำการ',
     'วันเวลาทำการ',
+    'เวลาเปิดทำการ',
+    'เวลาเปิดบริการ',
     'เสาร์อาทิตย์เปิดไหม',
     'วันเสาร์เปิดไหม',
     'วันอาทิตย์เปิดไหม',
     'เปิดวันเสาร์ไหม',
     'เปิดวันอาทิตย์ไหม',
+    'วันเสาร์เปิดให้บริการไหม',
+    'เสาร์อาทิตย์เปิดให้บริการไหม',
   ],
   ต้องจองคิวไหม: [
     'จองล่วงหน้า',
@@ -106,36 +213,91 @@ const SUPPLEMENTAL_ALIASES_BY_QUESTION: Record<string, string[]> = {
     'ต้องจองไหม',
     'นัดคิว',
     'ต้องนัดไหม',
+    'ต้องนัดคิวไหม',
+    'ต้องนัดหมายไหม',
+    'ต้องนัดหมายล่วงหน้า',
+    'จองคิวยังไง',
+    'นัดหมายล่วงหน้า',
     'วอล์คอิน',
+    'วอล์คอินได้ไหม',
     'walk in',
+    'walk in ได้ไหม',
     'เข้าไปได้เลยไหม',
     'มาได้เลยไหม',
   ],
   เตรียมเอกสารอะไร: [
     'ใช้เอกสารอะไร',
+    'ใช้เอกสารอะไรบ้าง',
     'ต้องเตรียมอะไร',
+    'ต้องเตรียมอะไรไปบ้าง',
+    'ต้องเตรียมเอกสารอะไร',
+    'ต้องเตรียมเอกสารอะไรบ้าง',
     'หลักฐานอะไร',
     'พกอะไรไปบ้าง',
     'นำอะไรไปบ้าง',
     'เอกสารอะไรบ้าง',
+    'ต้องใช้เอกสารอะไร',
     'ต้องใช้บัตรประชาชนไหม',
+    'ใช้บัตรประชาชนไหม',
+    'พกบัตรประชาชนไหม',
   ],
   ทดลองผ่านมือถือได้ไหม: [
     'สมาร์ทโฟน',
+    'สมาร์ทโฟนใช้ได้ไหม',
     'โทรศัพท์มือถือ',
+    'โทรศัพท์ใช้ได้ไหม',
     'ใช้ในมือถือ',
+    'ใช้ในมือถือได้ไหม',
+    'ใช้บนมือถือได้ไหม',
+    'ใช้ผ่านมือถือได้ไหม',
     'เปิดในมือถือ',
+    'เปิดในมือถือได้ไหม',
+    'เปิดผ่านมือถือ',
+    'เปิดผ่านมือถือได้ไหม',
+    'เปิดบนมือถือได้ไหม',
     'รองรับมือถือ',
+    'รองรับมือถือไหม',
     'ใช้มือถือได้ไหม',
+    'มือถือใช้ได้ไหม',
+    'มือถือเปิดได้ไหม',
     'เข้าผ่านมือถือ',
+    'เข้าผ่านมือถือได้ไหม',
+    'เข้าในมือถือได้ไหม',
+    'ทดลองในมือถือ',
+    'ใช้งานผ่านมือถือ',
     'เบราว์เซอร์อะไร',
+    'เบราว์เซอร์อะไรบ้าง',
+    'เบราว์เซอร์ไหน',
+    'เบราว์เซอร์ไหนบ้าง',
+    'ใช้เบราว์เซอร์อะไร',
+    'ใช้เบราว์เซอร์ไหน',
+    'ใช้เบราว์เซอร์ไหนบ้าง',
+    'เปิดในเบราว์เซอร์อะไร',
+    'เปิดในเบราว์เซอร์ไหน',
+    'เปิดในเบราว์เซอร์ไหนบ้าง',
+    'เปิดได้ในเบราว์เซอร์ไหนบ้าง',
+    'เปิดได้ในเบราว์เซอร์ไหน',
+    'เปิดบนเบราว์เซอร์ไหน',
+    'เปิดบนเบราว์เซอร์อะไร',
+    'เปิดด้วยเบราว์เซอร์อะไร',
+    'ใช้ chrome ได้ไหม',
+    'ใช้โครมได้ไหม',
+    'เปิดใน chrome ได้ไหม',
+    'เปิดบน chrome ได้ไหม',
+    'เปิดผ่าน chrome ได้ไหม',
+    'รองรับ chrome ไหม',
+    'รองรับโครมไหม',
   ],
   ติดต่อใครเมื่อไม่มีคำตอบ: [
     'ติดต่อใคร',
+    'ติดต่อใครได้บ้าง',
     'ติดต่อเจ้าหน้าที่',
+    'ติดต่อเจ้าหน้าที่ได้ที่ไหน',
     'ผู้ดูแล',
     'สอบถามเพิ่มเติม',
+    'สอบถามเพิ่มเติมได้ที่ไหน',
     'ถามใครได้',
+    'สอบถามใครได้บ้าง',
     'ติดต่อได้ที่ไหน',
   ],
 };
@@ -217,6 +379,12 @@ const OUT_OF_SCOPE_FAST_PATH_PATTERNS: readonly RegExp[] = [
   /เบอร์ติดต่อ/u,
   /แผนที่/u,
   /เดินทางยังไง/u,
+  /ล่วงเวลา/u,
+  /ทำงานล่วงเวลา/u,
+  /นอกเวลาทำการ/u,
+  /โอที/u,
+  /บริการพิเศษ/u,
+  /สิทธิพิเศษ/u,
 ];
 
 /**
@@ -256,19 +424,13 @@ const MULTI_INTENT_CONNECTOR_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * Angles on opening hours (e.g. closing time or weekend availability) where LLM phrasing
- * directly answers the specific sub-question better than the raw canonical string.
+ * Unmentioned specific time or schedule sub-angles (such as lunch break or special holiday policies)
+ * where the canonical FAQ answer does not contain facts, requiring LLM handling.
  */
-const REVERSE_OR_SPECIFIC_TIME_ANGLE_PATTERNS: readonly RegExp[] = [
-  /(?<!เ)ปิดกี่โมง/u,
-  /(?<!เ)ปิดบริการ/u,
-  /(?<!เ)ปิดทำการ/u,
-  /เวลาปิด/u,
-  /เปิดถึงกี่โมง/u,
-  /เสาร์/u,
-  /อาทิตย์/u,
-  /วันหยุด/u,
+const UNANSWERED_SPECIFIC_SCHEDULE_PATTERNS: readonly RegExp[] = [
   /พักเที่ยง/u,
+  /พักกลางวัน/u,
+  /หยุดชดเชย/u,
 ];
 
 /**
@@ -290,6 +452,25 @@ const APPROVED_FAST_PATH_PHRASES_BY_QUESTION: Record<
     'เวลาเปิดบริการ',
     'เวลาเปิดทำการ',
     'เปิดให้บริการกี่โมง',
+    'เปิดวันไหน',
+    'เปิดวันไหนบ้าง',
+    'เปิดวันอะไร',
+    'เปิดทำการวันไหน',
+    'เปิดให้บริการวันไหน',
+    'กี่โมงถึงกี่โมง',
+    'เปิดถึงกี่โมง',
+    'ปิดกี่โมง',
+    'ปิดบริการกี่โมง',
+    'ปิดทำการกี่โมง',
+    'เวลาปิด',
+    'เวลาปิดบริการ',
+    'วันเสาร์เปิดไหม',
+    'เสาร์อาทิตย์เปิดไหม',
+    'เปิดวันเสาร์ไหม',
+    'เปิดวันอาทิตย์ไหม',
+    'วันอาทิตย์เปิดไหม',
+    'วันเสาร์เปิดให้บริการไหม',
+    'เสาร์อาทิตย์เปิดให้บริการไหม',
   ],
   ต้องจองคิวไหม: [
     'ต้องจองคิวไหม',
@@ -300,8 +481,15 @@ const APPROVED_FAST_PATH_PHRASES_BY_QUESTION: Record<
     'ต้องจองไหม',
     'ต้องนัดไหม',
     'ต้องนัดคิวไหม',
+    'ต้องนัดหมายไหม',
     'จองคิวยังไง',
     'นัดหมายล่วงหน้า',
+    'วอล์คอิน',
+    'วอล์คอินได้ไหม',
+    'walk in',
+    'walk in ได้ไหม',
+    'เข้าไปได้เลยไหม',
+    'มาได้เลยไหม',
   ],
   เตรียมเอกสารอะไร: [
     'เตรียมเอกสารอะไร',
@@ -315,6 +503,9 @@ const APPROVED_FAST_PATH_PHRASES_BY_QUESTION: Record<
     'เอาอะไรไปบ้าง',
     'พกอะไรไปบ้าง',
     'นำอะไรไปบ้าง',
+    'ต้องใช้บัตรประชาชนไหม',
+    'ใช้บัตรประชาชนไหม',
+    'พกบัตรประชาชนไหม',
   ],
   ทดลองผ่านมือถือได้ไหม: [
     'ทดลองผ่านมือถือได้ไหม',
@@ -323,15 +514,49 @@ const APPROVED_FAST_PATH_PHRASES_BY_QUESTION: Record<
     'เปิดในมือถือได้ไหม',
     'รองรับมือถือไหม',
     'เข้าผ่านมือถือได้ไหม',
+    'เข้าในมือถือได้ไหม',
     'ทดลองในมือถือ',
     'ใช้งานผ่านมือถือ',
+    'เปิดผ่านมือถือได้ไหม',
+    'เปิดผ่านมือถือ',
+    'เปิดในมือถือ',
+    'ใช้ผ่านมือถือได้ไหม',
+    'ใช้บนมือถือได้ไหม',
+    'เปิดบนมือถือได้ไหม',
+    'มือถือใช้ได้ไหม',
+    'มือถือเปิดได้ไหม',
+    'โทรศัพท์ใช้ได้ไหม',
+    'สมาร์ทโฟนใช้ได้ไหม',
     'ใช้เบราว์เซอร์อะไร',
+    'ใช้เบราว์เซอร์ไหน',
+    'ใช้เบราว์เซอร์ไหนบ้าง',
+    'เปิดในเบราว์เซอร์อะไร',
+    'เปิดในเบราว์เซอร์ไหน',
+    'เปิดในเบราว์เซอร์ไหนบ้าง',
+    'เปิดได้ในเบราว์เซอร์ไหนบ้าง',
+    'เปิดได้ในเบราว์เซอร์ไหน',
+    'เปิดบนเบราว์เซอร์ไหน',
+    'เปิดบนเบราว์เซอร์อะไร',
+    'เปิดด้วยเบราว์เซอร์อะไร',
+    'เบราว์เซอร์ไหนบ้าง',
+    'เบราว์เซอร์อะไรบ้าง',
+    'เบราว์เซอร์อะไร',
+    'ใช้ chrome ได้ไหม',
+    'ใช้โครมได้ไหม',
+    'เปิดใน chrome ได้ไหม',
+    'เปิดบน chrome ได้ไหม',
+    'เปิดผ่าน chrome ได้ไหม',
+    'รองรับ chrome ไหม',
+    'รองรับโครมไหม',
   ],
   ติดต่อใครเมื่อไม่มีคำตอบ: [
     'ติดต่อใครเมื่อไม่มีคำตอบ',
     'ถ้าไม่มีคำตอบติดต่อใคร',
     'สอบถามเพิ่มเติมได้ที่ไหน',
     'สอบถามข้อมูลเพิ่มเติมได้ที่ใคร',
+    'ติดต่อใครได้บ้าง',
+    'ติดต่อเจ้าหน้าที่ได้ที่ไหน',
+    'สอบถามใครได้บ้าง',
     'ติดต่อผู้ดูแลการสาธิต',
     'ติดต่อเจ้าหน้าที่ประชาสัมพันธ์',
   ],
@@ -400,7 +625,6 @@ export function scoreFaqRecord(
     normalizeThaiText(faq.question),
   );
   const faqQuestionCore = extractQuestionCore(faqQuestionNorm);
-
   let score = 0;
   const matchedTerms: string[] = [];
 
@@ -411,17 +635,69 @@ export function scoreFaqRecord(
     return { faq, score: 0, matchedTerms };
   }
 
-  // 1. Exact question match (full or core stem)
+  // Explicitly unsupported sub-intents (e.g. overtime work, special privileges)
+  // must never falsely match regular FAQ schedules or contact points.
+  if (/ล่วงเวลา|ทำงานล่วงเวลา|โอที|นอกเวลาทำการ/u.test(politeStrippedQuery)) {
+    return { faq, score: 0, matchedTerms };
+  }
+  if (/บริการพิเศษ|สิทธิพิเศษ/u.test(politeStrippedQuery)) {
+    return { faq, score: 0, matchedTerms };
+  }
+
+  const conversationalStripped =
+    stripLeadingConversationalPrefixes(politeStrippedQuery);
+  const locativeStripped = stripLocativeDemonstratives(conversationalStripped);
+  const conversationalClean = locativeStripped
+    .replace(/\s*(?:ล่ะ|ละ)\s*/g, ' ')
+    .trim();
+  const conversationalCore = extractQuestionCore(conversationalClean);
+
+  const locativeStrippedQuery =
+    stripLocativeDemonstratives(politeStrippedQuery);
+  const locativeStrippedCore = extractQuestionCore(locativeStrippedQuery);
+
+  const spacelessPolite = politeStrippedQuery.replace(/\s+/g, '');
+  const spacelessQueryCore = queryCore.replace(/\s+/g, '');
+  const spacelessLocativeQuery = locativeStrippedQuery.replace(/\s+/g, '');
+  const spacelessLocativeCore = locativeStrippedCore.replace(/\s+/g, '');
+  const spacelessConversational = conversationalClean.replace(/\s+/g, '');
+  const spacelessConversationalCore = conversationalCore.replace(/\s+/g, '');
+
+  const spacelessFaqNorm = faqQuestionNorm.replace(/\s+/g, '');
+  const spacelessFaqCore = faqQuestionCore.replace(/\s+/g, '');
+
+  // 1. Exact question match (full or core stem, with or without conversational prefix)
   if (
     politeStrippedQuery === faqQuestionNorm ||
-    (faqQuestionCore.length >= 4 && queryCore === faqQuestionCore)
+    conversationalClean === faqQuestionNorm ||
+    locativeStrippedQuery === faqQuestionNorm ||
+    spacelessPolite === spacelessFaqNorm ||
+    spacelessLocativeQuery === spacelessFaqNorm ||
+    spacelessConversational === spacelessFaqNorm ||
+    (faqQuestionCore.length >= 4 &&
+      (queryCore === faqQuestionCore ||
+        conversationalCore === faqQuestionCore ||
+        locativeStrippedCore === faqQuestionCore ||
+        spacelessQueryCore === spacelessFaqCore ||
+        spacelessLocativeCore === spacelessFaqCore ||
+        spacelessConversationalCore === spacelessFaqCore))
   ) {
     score += 120;
     matchedTerms.push(`exact:${faq.question}`);
   } else if (
     politeStrippedQuery.includes(faqQuestionNorm) ||
+    conversationalClean.includes(faqQuestionNorm) ||
+    locativeStrippedQuery.includes(faqQuestionNorm) ||
+    spacelessPolite.includes(spacelessFaqNorm) ||
+    spacelessLocativeQuery.includes(spacelessFaqNorm) ||
+    spacelessConversational.includes(spacelessFaqNorm) ||
     (faqQuestionCore.length >= 6 &&
-      politeStrippedQuery.includes(faqQuestionCore))
+      (politeStrippedQuery.includes(faqQuestionCore) ||
+        conversationalClean.includes(faqQuestionCore) ||
+        locativeStrippedQuery.includes(faqQuestionCore) ||
+        spacelessPolite.includes(spacelessFaqCore) ||
+        spacelessLocativeQuery.includes(spacelessFaqCore) ||
+        spacelessConversational.includes(spacelessFaqCore)))
   ) {
     // 2. Full FAQ question phrase contained inside user query
     score += 85 + faqQuestionCore.length * 2;
@@ -435,7 +711,18 @@ export function scoreFaqRecord(
     .sort((a, b) => b.length - a.length);
 
   for (const kw of sortedKeywords) {
-    if (politeStrippedQuery.includes(kw) || queryCore.includes(kw)) {
+    const spacelessKw = kw.replace(/\s+/g, '');
+    if (
+      politeStrippedQuery.includes(kw) ||
+      queryCore.includes(kw) ||
+      conversationalClean.includes(kw) ||
+      conversationalCore.includes(kw) ||
+      locativeStrippedQuery.includes(kw) ||
+      locativeStrippedCore.includes(kw) ||
+      spacelessPolite.includes(spacelessKw) ||
+      spacelessLocativeQuery.includes(spacelessKw) ||
+      spacelessConversational.includes(spacelessKw)
+    ) {
       // Longer, specific phrases receive significantly higher weight
       const kwScore = 30 + kw.length * 4;
       score += kwScore;
@@ -448,10 +735,33 @@ export function scoreFaqRecord(
     SUPPLEMENTAL_ALIASES_BY_QUESTION[faq.question] ?? [];
   for (const rawAlias of supplementalAliases) {
     const alias = normalizeThaiText(rawAlias);
+    const aliasCore = extractQuestionCore(alias);
+    const spacelessAlias = alias.replace(/\s+/g, '');
+    const spacelessAliasCore = aliasCore.replace(/\s+/g, '');
     if (
       alias.length >= 3 &&
       !GENERIC_STANDALONE_WORDS.has(alias) &&
-      (politeStrippedQuery.includes(alias) || queryCore.includes(alias))
+      (politeStrippedQuery.includes(alias) ||
+        queryCore.includes(alias) ||
+        conversationalClean.includes(alias) ||
+        conversationalCore.includes(alias) ||
+        locativeStrippedQuery.includes(alias) ||
+        locativeStrippedCore.includes(alias) ||
+        spacelessPolite.includes(spacelessAlias) ||
+        spacelessLocativeQuery.includes(spacelessAlias) ||
+        spacelessConversational.includes(spacelessAlias) ||
+        (spacelessConversationalCore.length >= 4 &&
+          (spacelessAlias.includes(spacelessConversationalCore) ||
+            spacelessAliasCore.includes(spacelessConversationalCore) ||
+            spacelessConversationalCore.includes(spacelessAliasCore))) ||
+        (spacelessLocativeCore.length >= 4 &&
+          (spacelessAlias.includes(spacelessLocativeCore) ||
+            spacelessAliasCore.includes(spacelessLocativeCore) ||
+            spacelessLocativeCore.includes(spacelessAliasCore))) ||
+        (conversationalCore.length >= 4 &&
+          (alias.includes(conversationalCore) ||
+            aliasCore.includes(conversationalCore) ||
+            conversationalCore.includes(aliasCore))))
     ) {
       score += 25 + alias.length * 3;
       matchedTerms.push(`alias:${alias}`);
@@ -546,19 +856,22 @@ export function evaluateSafeFastPath(
 
   const primaryMatch = selected[0];
   const primaryFaq = primaryMatch.faq;
+  const conversationalStripped =
+    stripLeadingConversationalPrefixes(politeStripped);
+  const locativeStripped = stripLocativeDemonstratives(conversationalStripped);
+  const conversationalClean = locativeStripped
+    .replace(/\s*(?:ล่ะ|ละ)\s*/g, ' ')
+    .trim();
+  const conversationalCore = extractQuestionCore(conversationalClean);
 
-  if (
-    primaryFaq.question === 'เปิดบริการกี่โมง' &&
-    REVERSE_OR_SPECIFIC_TIME_ANGLE_PATTERNS.some((pattern) =>
-      pattern.test(normalizedTranscript),
-    )
-  ) {
-    return {
-      highConfidenceFastPath: false,
-      fastPathMatchReason: 'NONE',
-      fastPathDisqualifier: 'REVERSE_OR_SPECIFIC_TIME_ANGLE',
-    };
-  }
+  const locativeStrippedQuery = stripLocativeDemonstratives(politeStripped);
+  const locativeStrippedCore = extractQuestionCore(locativeStrippedQuery);
+
+  const spacelessPolite = politeStripped.replace(/\s+/g, '');
+  const spacelessLocativeQuery = locativeStrippedQuery.replace(/\s+/g, '');
+  const spacelessLocativeCore = locativeStrippedCore.replace(/\s+/g, '');
+  const spacelessConversational = conversationalClean.replace(/\s+/g, '');
+  const spacelessConversationalCore = conversationalCore.replace(/\s+/g, '');
 
   // Check 1: Exact question match
   const hasExactMatch = primaryMatch.matchedTerms.some((term) =>
@@ -579,10 +892,38 @@ export function evaluateSafeFastPath(
       normalizeThaiText(rawPhrase),
     );
     const corePhrase = extractQuestionCore(normPhrase);
+    const spacelessPhrase = normPhrase.replace(/\s+/g, '');
+    const spacelessCorePhrase = corePhrase.replace(/\s+/g, '');
     return (
-      (normPhrase.length >= 4 && politeStripped.includes(normPhrase)) ||
+      (normPhrase.length >= 4 &&
+        (politeStripped.includes(normPhrase) ||
+          conversationalClean.includes(normPhrase) ||
+          locativeStrippedQuery.includes(normPhrase) ||
+          spacelessPolite.includes(spacelessPhrase) ||
+          spacelessLocativeQuery.includes(spacelessPhrase) ||
+          spacelessConversational.includes(spacelessPhrase))) ||
       (corePhrase.length >= 4 &&
-        (politeStripped.includes(corePhrase) || coreQuery.includes(corePhrase)))
+        (politeStripped.includes(corePhrase) ||
+          coreQuery.includes(corePhrase) ||
+          conversationalClean.includes(corePhrase) ||
+          conversationalCore.includes(corePhrase) ||
+          locativeStrippedQuery.includes(corePhrase) ||
+          locativeStrippedCore.includes(corePhrase) ||
+          spacelessPolite.includes(spacelessCorePhrase) ||
+          spacelessLocativeQuery.includes(spacelessCorePhrase) ||
+          spacelessLocativeCore.includes(spacelessCorePhrase) ||
+          spacelessConversational.includes(spacelessCorePhrase) ||
+          spacelessConversationalCore.includes(spacelessCorePhrase))) ||
+      (conversationalCore.length >= 4 &&
+        (normPhrase.includes(conversationalCore) ||
+          corePhrase.includes(conversationalCore) ||
+          spacelessPhrase.includes(spacelessConversationalCore) ||
+          spacelessCorePhrase.includes(spacelessConversationalCore) ||
+          spacelessConversationalCore.includes(spacelessCorePhrase))) ||
+      (spacelessLocativeCore.length >= 4 &&
+        (spacelessPhrase.includes(spacelessLocativeCore) ||
+          spacelessCorePhrase.includes(spacelessLocativeCore) ||
+          spacelessLocativeCore.includes(spacelessCorePhrase)))
     );
   });
 
@@ -590,6 +931,20 @@ export function evaluateSafeFastPath(
     return {
       highConfidenceFastPath: true,
       fastPathMatchReason: 'APPROVED_INTENT_ALIAS',
+    };
+  }
+
+  // Check 3: Unanswered specific schedule angles (e.g. lunch breaks)
+  if (
+    primaryFaq.question === 'เปิดบริการกี่โมง' &&
+    UNANSWERED_SPECIFIC_SCHEDULE_PATTERNS.some((pattern) =>
+      pattern.test(normalizedTranscript),
+    )
+  ) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'REVERSE_OR_SPECIFIC_TIME_ANGLE',
     };
   }
 
@@ -762,15 +1117,6 @@ export function matchFaqsWithConversationContext(
 
   const isFollowUp = hasContextualFollowUpSignal(rawTranscript);
 
-  // Preserve Self-Contained High-Confidence Fast Path (0 LLM cost)
-  if (primary.highConfidenceFastPath && !isFollowUp) {
-    return primary;
-  }
-
-  if (!isFollowUp) {
-    return primary;
-  }
-
   // Extract recent referenced FAQ IDs from conversationHistory (most recent turn first)
   const referencedFaqIds: number[] = [];
   const seenIds = new Set<number>();
@@ -793,6 +1139,34 @@ export function matchFaqsWithConversationContext(
         }
       }
     }
+  }
+
+  // Preserve Self-Contained High-Confidence Fast Path (0 LLM cost)
+  // When the query unambiguously matches an approved phrase on a single FAQ:
+  // - If it has no follow-up signal, return primary immediately.
+  // - If it has a conversational follow-up signal, preserve Fast Path if the context agrees on the same FAQ
+  //   or the query has an approved intent phrase for that specific FAQ.
+  if (primary.highConfidenceFastPath && primary.faqs.length === 1) {
+    if (!isFollowUp) {
+      return primary;
+    }
+
+    const primaryId = primary.faqs[0].id;
+    const recentFaqId =
+      referencedFaqIds.length > 0 ? referencedFaqIds[0] : null;
+
+    if (
+      recentFaqId === null ||
+      recentFaqId === primaryId ||
+      primary.fastPathMatchReason === 'EXACT_QUESTION' ||
+      primary.fastPathMatchReason === 'APPROVED_INTENT_ALIAS'
+    ) {
+      return primary;
+    }
+  }
+
+  if (!isFollowUp) {
+    return primary;
   }
 
   if (referencedFaqIds.length === 0) {

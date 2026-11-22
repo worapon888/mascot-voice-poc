@@ -577,14 +577,34 @@ const tests: TestCase[] = [
       assert.equal(hasContextualFollowUpSignal('ถ้าไม่มีล่ะ'), true);
       assert.equal(hasContextualFollowUpSignal('ต้องจองคิวล่วงหน้าไหม'), false);
 
-      // Follow-up 1: "แล้ววันเสาร์ล่ะครับ" (does not repeat "เปิดบริการ", relies on Turn 1 FAQ #1)
-      const contextualRetrieval = matchFaqsWithConversationContext(
+      // Follow-up 1: "แล้ววันเสาร์ล่ะครับ" with Turn 1 FAQ #1 qualifies for Option B Safe Fast Path
+      const fastPathFollowUp = matchFaqsWithConversationContext(
         'แล้ววันเสาร์ล่ะครับ',
         DEMO_FAQS,
         historyAfterTurn1,
       );
+      assert.equal(fastPathFollowUp.matched, true);
+      assert.equal(fastPathFollowUp.faqs[0].id, 1);
+      assert.equal(fastPathFollowUp.highConfidenceFastPath, true);
+
+      // Follow-up 2: Contextual Ambiguous Follow-up ("ถ้าไม่มีล่ะ") relies on Turn 1 FAQ #3 ("เตรียมเอกสารอะไร")
+      // and requires Grounded LLM reasoning (cannot be resolved by Fast Path)
+      const historyAfterTurn1Faq3: ConversationTurn[] = [
+        { role: 'user', text: 'เตรียมเอกสารอะไร', faqIds: [3] },
+        {
+          role: 'assistant',
+          text: DEMO_FAQS[2].answer,
+          faqIds: [3],
+        },
+      ];
+
+      const contextualRetrieval = matchFaqsWithConversationContext(
+        'ถ้าไม่มีล่ะ',
+        DEMO_FAQS,
+        historyAfterTurn1Faq3,
+      );
       assert.equal(contextualRetrieval.matched, true);
-      assert.equal(contextualRetrieval.faqs[0].id, 1);
+      assert.equal(contextualRetrieval.faqs[0].id, 3);
       assert.equal(contextualRetrieval.highConfidenceFastPath, false);
       assert.equal(
         contextualRetrieval.fastPathDisqualifier,
@@ -594,30 +614,30 @@ const tests: TestCase[] = [
       // Verify prompt construction includes both <faq_evidence> and <conversation_history>
       const promptInput = buildGroundedFaqPromptInput(
         contextualRetrieval.faqs,
-        'แล้ววันเสาร์ล่ะครับ',
-        historyAfterTurn1,
+        'ถ้าไม่มีล่ะ',
+        historyAfterTurn1Faq3,
       );
       assert.ok(promptInput.includes('<faq_evidence>'));
       assert.ok(promptInput.includes('<conversation_history>'));
-      assert.ok(promptInput.includes('[FAQ #1]'));
+      assert.ok(promptInput.includes('[FAQ #3]'));
 
       // Verify generateGroundedAnswerWithMetrics routes contextual follow-up through grounded LLM
       // and rejects fabricated claims not in evidence
       let llmPromptReceived = '';
       const result = await generateGroundedAnswerWithMetrics(
-        'แล้ววันเสาร์ล่ะครับ',
+        'ถ้าไม่มีล่ะ',
         async (q, hist) =>
           matchFaqsWithConversationContext(q, DEMO_FAQS, hist, 2),
         async () => ({
           hit: false,
           reason: 'METADATA_NOT_FOUND',
-          contentHash: 'hash_faq_1',
+          contentHash: 'hash_faq_3',
           lookupLatencyMs: 0,
         }),
-        historyAfterTurn1,
+        historyAfterTurn1Faq3,
         async (prompt) => {
           llmPromptReceived = prompt;
-          return 'วันเสาร์ปิดทำการครับ โดยเปิดให้บริการเฉพาะวันจันทร์ถึงวันศุกร์ เวลา 09:00–16:00 น. เว้นวันหยุดราชการ ครับ';
+          return 'สำหรับการทดสอบระบบวันนี้ไม่ต้องใช้เอกสารจริงครับ แต่หากติดต่อราชการทั่วไปควรมีบัตรประชาชนครับ';
         },
       );
 
@@ -625,8 +645,7 @@ const tests: TestCase[] = [
       assert.equal(result.metrics.llmCalled, true);
       assert.equal(result.metrics.fastPathBypassedLlm, false);
       assert.equal(result.response.matched, true);
-      assert.deepEqual(result.response.faqIds, [1]);
-      assert.ok(result.response.answer.includes('09:00–16:00'));
+      assert.deepEqual(result.response.faqIds, [3]);
 
       // Out-of-scope query ("ห้องน้ำอยู่ชั้นไหน") even after Turn 1 must NOT match Turn 1's FAQ
       const outOfScopeAfterTurn1 = matchFaqsWithConversationContext(

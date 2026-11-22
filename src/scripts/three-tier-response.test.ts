@@ -143,60 +143,100 @@ async function runTests(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Tier 2: "วันเสาร์เปิดไหม" -> Matches FAQ #1 with sufficient evidence, rephrased via LLM
+  // 3. Tier 1: "วันเสาร์เปิดไหม" -> Matches FAQ #1 Approved Alias (Option A Fast Path)
   // ---------------------------------------------------------------------------
   {
-    let llmCalled = false;
     const res = await generateGroundedAnswerWithMetrics(
       'วันเสาร์เปิดไหมครับ',
       async (q) => matchFaqsAgainstRecords(q, SEEDED_FAQS),
       async () => ({
-        hit: false,
-        reason: 'STATUS_NOT_READY',
-        contentHash: '',
+        hit: true,
+        reason: 'READY_VERIFIED',
+        contentHash: 'hash-faq-1',
         lookupLatencyMs: 0,
+        audioRef: {
+          faqId: 1,
+          contentHash: 'hash-faq-1',
+          audioUrl: 'https://cdn.example.com/faq-1.mp3',
+          objectPath: 'faqs/v1/faq-1.mp3',
+          mimeType: 'audio/mpeg',
+          byteLength: 103296,
+        },
       }),
-      [],
-      async (prompt, faqs) => {
-        llmCalled = true;
-        assert.equal(
-          faqs.some((f) => f.id === 1),
-          true,
-          'Must ground on FAQ #1 evidence',
-        );
-        return 'วันเสาร์ปิดทำการครับ โดยจุดบริการ Demo เปิดทำการวันจันทร์ถึงวันศุกร์ เวลา 09:00–16:00 น. ครับ';
-      },
     );
 
-    assert.equal(res.response.tier, 'TIER_2');
+    assert.equal(res.response.tier, 'TIER_1');
     assert.equal(res.response.matched, true);
     assert.deepEqual(res.response.faqIds, [1]);
-    assert.equal(llmCalled, true);
-    assert.equal(res.metrics.llmCalled, true);
-    assert.equal(res.metrics.fastPathBypassedLlm, false);
-    assert.equal(res.response.answer.includes('วันเสาร์'), true);
+    assert.equal(res.metrics.llmCalled, false);
+    assert.equal(res.metrics.fastPathBypassedLlm, true);
+    assert.equal(res.metrics.persistentAudioStatus, 'HIT');
     console.log(
-      '[PASS] R03 — "วันเสาร์เปิดไหม" -> Tier 2 (Matches FAQ #1 evidence, rephrased via LLM)',
+      '[PASS] R03 — "วันเสาร์เปิดไหม" -> Tier 1 (Matches FAQ #1 Approved Alias, Fast Path)',
     );
     passed += 1;
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Tier 2: Conversation Contextual Follow-up ("เปิดกี่โมง" -> "แล้ววันเสาร์ล่ะ")
+  // 4. Tier 1: Contextual Follow-up on FAQ #4 ("แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ")
   // ---------------------------------------------------------------------------
   {
     const history: ConversationTurn[] = [
-      { role: 'user', text: 'เปิดกี่โมงครับ' },
+      { role: 'user', text: 'เปิดผ่านมือถือได้ไหม' },
       {
         role: 'assistant',
-        text: 'จุดบริการ Demo เปิดจันทร์–ศุกร์ 09:00–16:00 น. ครับ',
-        faqIds: [1],
+        text: 'Demo นี้แนะนำ Chrome Desktop; Mobile ยังไม่รับรองจนกว่าจะทดสอบครับ',
+        faqIds: [4],
+      },
+    ];
+
+    const res = await generateGroundedAnswerWithMetrics(
+      'แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ',
+      async (q, hist) => matchFaqsWithConversationContext(q, SEEDED_FAQS, hist),
+      async () => ({
+        hit: true,
+        reason: 'READY_VERIFIED',
+        contentHash: 'hash-faq-4',
+        lookupLatencyMs: 0,
+        audioRef: {
+          faqId: 4,
+          contentHash: 'hash-faq-4',
+          audioUrl: 'https://cdn.example.com/faq-4.mp3',
+          objectPath: 'faqs/v1/faq-4.mp3',
+          mimeType: 'audio/mpeg',
+          byteLength: 110000,
+        },
+      }),
+      history,
+    );
+
+    assert.equal(res.response.tier, 'TIER_1');
+    assert.equal(res.response.matched, true);
+    assert.deepEqual(res.response.faqIds, [4]);
+    assert.equal(res.metrics.llmCalled, false);
+    assert.equal(res.metrics.fastPathBypassedLlm, true);
+    console.log(
+      '[PASS] R04 — Contextual Follow-up on FAQ #4 ("แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ") -> Tier 1 Fast Path',
+    );
+    passed += 1;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 4B. Tier 2: Conditional Contextual Follow-up ("แล้วถ้าไม่มีล่ะ") -> Requires LLM
+  // ---------------------------------------------------------------------------
+  {
+    const history: ConversationTurn[] = [
+      { role: 'user', text: 'เตรียมเอกสารอะไรครับ' },
+      {
+        role: 'assistant',
+        text: 'การทดลอง Demo ใช้เลขอ้างอิง DEMO-001 ไม่ต้องส่งเอกสารส่วนบุคคลครับ',
+        faqIds: [3],
       },
     ];
 
     let contextualLlmCalled = false;
     const res = await generateGroundedAnswerWithMetrics(
-      'แล้ววันเสาร์ล่ะครับ',
+      'แล้วถ้าไม่มีล่ะครับ',
       async (q, hist) => matchFaqsWithConversationContext(q, SEEDED_FAQS, hist),
       async () => ({
         hit: false,
@@ -208,21 +248,21 @@ async function runTests(): Promise<void> {
       async (prompt, faqs, hist) => {
         contextualLlmCalled = true;
         assert.equal(
-          faqs.some((f) => f.id === 1),
+          faqs.some((f) => f.id === 3),
           true,
         );
         assert.equal(hist.length, 2);
-        return 'วันเสาร์ปิดทำการครับ โดยเปิดให้บริการเฉพาะวันจันทร์ถึงวันศุกร์ เวลา 09:00–16:00 น. ครับ';
+        return 'สำหรับการทดลอง Demo ใช้เพียงเลขอ้างอิง DEMO-001 ไม่ต้องใช้เอกสารส่วนบุคคลอื่นครับ';
       },
     );
 
     assert.equal(res.response.tier, 'TIER_2');
     assert.equal(res.response.matched, true);
-    assert.deepEqual(res.response.faqIds, [1]);
+    assert.deepEqual(res.response.faqIds, [3]);
     assert.equal(contextualLlmCalled, true);
     assert.equal(res.metrics.llmCalled, true);
     console.log(
-      '[PASS] R04 — Contextual Follow-up ("แล้ววันเสาร์ล่ะ") -> Tier 2 (Inherits FAQ #1 Context)',
+      '[PASS] R04B — Conditional Follow-up ("แล้วถ้าไม่มีล่ะ") -> Tier 2 (Contextual LLM Reasoning)',
     );
     passed += 1;
   }

@@ -523,24 +523,28 @@ test(
     assert.equal(resC.metrics.fastPathBypassedLlm, true);
     assert.equal(resC.metrics.persistentAudioCacheHit, true);
 
-    // Case D: Contextual Question "แล้ววันเสาร์ล่ะ" (History: FAQ #1) -> Tier 2
+    // Case D: Contextual Question "แล้วถ้าไม่มีบัตรประชาชนล่ะ" (History: FAQ #3) -> Tier 2
     const history: ConversationTurn[] = [
-      { role: 'user', text: 'เปิดกี่โมง' },
-      { role: 'assistant', text: 'เปิด 09:00–16:00 น.', faqIds: [1] },
+      { role: 'user', text: 'เตรียมเอกสารอะไร' },
+      {
+        role: 'assistant',
+        text: 'การทดลอง Demo ใช้เลขอ้างอิง DEMO-001 ไม่ต้องส่งเอกสารส่วนบุคคล',
+        faqIds: [3],
+      },
     ];
     const resD = await generateGroundedAnswerWithMetrics(
-      'แล้ววันเสาร์ล่ะ',
+      'แล้วถ้าไม่มีบัตรประชาชนล่ะ',
       mockRetriever,
       mockAudioResolver,
       history,
       async () =>
-        'วันเสาร์ปิดทำการครับ โดยเปิดให้บริการวันจันทร์ถึงวันศุกร์ เวลา 09:00–16:00 น. ครับ',
+        'สำหรับการทดลอง Demo ใช้เพียงเลขอ้างอิง DEMO-001 ไม่ต้องใช้บัตรประชาชนครับ',
     );
     assert.equal(resD.response.tier, 'TIER_2');
     assert.equal(resD.metrics.llmCalled, true);
     assert.equal(
       resD.response.answer,
-      'วันเสาร์ปิดทำการครับ โดยเปิดให้บริการวันจันทร์ถึงวันศุกร์ เวลา 09:00–16:00 น. ครับ',
+      'สำหรับการทดลอง Demo ใช้เพียงเลขอ้างอิง DEMO-001 ไม่ต้องใช้บัตรประชาชนครับ',
     );
   },
 );
