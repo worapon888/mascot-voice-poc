@@ -311,8 +311,15 @@ export async function resolvePersistentFaqAudioRef(
         byteLength: metadata.byte_length,
       },
     };
-  } catch {
+  } catch (err) {
     telemetry.persistentAudioMisses += 1;
+    const errMsg =
+      err instanceof Error
+        ? err.message
+        : 'Unknown persistent audio lookup error';
+    console.warn(
+      `[faq-audio.service] Persistent audio lookup failed for faq_id=${faq.id} (${errMsg}). Falling back to dynamic TTS pipeline.`,
+    );
     return {
       hit: false,
       reason: 'STORAGE_READ_ERROR',

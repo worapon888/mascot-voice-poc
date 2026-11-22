@@ -14,11 +14,36 @@ import {
   executeSmartPipelineStages,
   type RetrySessionSnapshot,
 } from '@/lib/voice/api-client';
+import { evaluateKioskAutoStart } from '@/lib/voice/vad-engine';
 import type { AnswerMode } from '@/types/api';
-import type { VoiceState } from '@/types/voice';
+import type { VoiceInteractionMode, VoiceState } from '@/types/voice';
+
+function resolveInitialKioskModeEnabled(): boolean {
+  const envDefault =
+    process.env.NEXT_PUBLIC_KIOSK_MODE?.trim().toLowerCase() !== 'false';
+  if (typeof window === 'undefined') {
+    return envDefault;
+  }
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const queryParam = params.get('kiosk')?.trim().toLowerCase();
+    if (queryParam === '0' || queryParam === 'false') {
+      return false;
+    }
+    if (queryParam === '1' || queryParam === 'true') {
+      return true;
+    }
+  } catch {
+    // Ignore URL parsing errors in restricted environments
+  }
+  return envDefault;
+}
 
 export function VoiceChat() {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+  const [interactionMode, setInteractionMode] =
+    useState<VoiceInteractionMode>('hands-free');
+  const [kioskModeEnabled] = useState<boolean>(resolveInitialKioskModeEnabled);
   const [transcript, setTranscript] = useState<string>('');
   const [answer, setAnswer] = useState<string>('');
   const [matchedFaqIds, setMatchedFaqIds] = useState<number[]>([]);
@@ -34,6 +59,11 @@ export function VoiceChat() {
   const lastRecordingRef = useRef<RecordedAudioPayload | null>(null);
   const retrySessionRef = useRef<RetrySessionSnapshot | null>(null);
   const pendingAudioBlobRef = useRef<Blob | null>(null);
+  const isHandsFreeActiveRef = useRef<boolean>(false);
+  const kioskBootstrappedRef = useRef<boolean>(false);
+  const pauseHandsFreeFnRef = useRef<() => void>(() => {});
+  const resumeHandsFreeFnRef = useRef<(cooldown?: boolean) => void>(() => {});
+  const stopHandsFreeFnRef = useRef<() => void>(() => {});
 
   const {
     mouthFrame,
@@ -54,6 +84,11 @@ export function VoiceChat() {
     async (recordingPayload: RecordedAudioPayload, isRetry = false) => {
       abortActiveRequest();
       stopAudio(true);
+
+      // Pause microphone VAD while processing and speaking to prevent self-listening
+      if (isHandsFreeActiveRef.current) {
+        pauseHandsFreeFnRef.current();
+      }
 
       const currentTurnId = ++turnIdRef.current;
       const controller = new AbortController();
@@ -128,23 +163,59 @@ export function VoiceChat() {
           pendingAudioBlobRef.current = ttsBlob;
           setAutoplayBlocked(true);
           setErrorMessage(
-            'เบราว์เซอร์บล็อกการเล่นเสียงอัตโนมัติ กรุณากดปุ่ม "เล่นเสียงตอบกลับ" ด้านบนเพื่อฟังเสียง',
+            'เบราว์เซอร์บล็อกการเล่นเสียงอัตโนมัติ (Autoplay Policy) กรุณากดปุ่ม "เล่นเสียงตอบกลับ" ด้านล่าง (สำหรับเครื่องตู้ Kiosk ให้เปิด Chrome ด้วยแฟล็ก --autoplay-policy=no-user-gesture-required)',
           );
-          setVoiceState('idle');
+          if (isHandsFreeActiveRef.current) {
+            setVoiceState('listening');
+            resumeHandsFreeFnRef.current(false);
+          } else {
+            setVoiceState('idle');
+          }
           return;
         }
 
-        setVoiceState('idle');
+        // If Hands-Free session is still active, return to 'listening' after post-playback tail cooldown
+        if (isHandsFreeActiveRef.current) {
+          setVoiceState('listening');
+          resumeHandsFreeFnRef.current(true);
+        } else {
+          setVoiceState('idle');
+        }
       } catch (err) {
         if (currentTurnId !== turnIdRef.current) {
           return;
         }
         if (err instanceof Error && err.name === 'AbortError') {
-          setVoiceState('idle');
+          if (isHandsFreeActiveRef.current) {
+            setVoiceState('listening');
+            resumeHandsFreeFnRef.current(false);
+          } else {
+            setVoiceState('idle');
+          }
           return;
         }
 
         stopAudio(true);
+
+        // If STT returned EMPTY_TRANSCRIPT during Hands-Free listening (e.g. background noise),
+        // resume listening smoothly instead of killing the continuous session.
+        if (
+          isHandsFreeActiveRef.current &&
+          err instanceof ClientVoiceError &&
+          err.code === 'EMPTY_TRANSCRIPT'
+        ) {
+          setErrorMessage('ยังไม่ได้ยินคำถามที่ชัดเจน ระบบกำลังรอฟังคำถามถัดไปครับ');
+          setVoiceState('listening');
+          resumeHandsFreeFnRef.current(false);
+          return;
+        }
+
+        // For fatal/upstream errors, close any active Hands-Free mic stream so mic does not stay open in error state
+        if (isHandsFreeActiveRef.current) {
+          isHandsFreeActiveRef.current = false;
+          stopHandsFreeFnRef.current();
+        }
+
         const message =
           err instanceof ClientVoiceError
             ? err.message
@@ -167,6 +238,7 @@ export function VoiceChat() {
       turnIdRef.current += 1;
       abortActiveRequest();
       stopAudio(true);
+      isHandsFreeActiveRef.current = false;
       setErrorMessage(error.message);
       setVoiceState('error');
     },
@@ -174,8 +246,14 @@ export function VoiceChat() {
   );
 
   const {
+    isHandsFreeSessionActive,
     elapsedSeconds,
     maxRecordingSeconds,
+    micAmplitude,
+    startHandsFreeSession,
+    pauseHandsFreeListening,
+    resumeHandsFreeListening,
+    stopHandsFreeSession,
     startRecording,
     stopAndSubmitRecording,
     cancelRecording,
@@ -183,18 +261,156 @@ export function VoiceChat() {
     onAutoStopComplete: (payload) => {
       void executeVoicePipeline(payload);
     },
+    onVadSpeechStart: () => {
+      if (isHandsFreeActiveRef.current) {
+        setErrorMessage(null);
+        setVoiceState('recording');
+      }
+    },
+    onVadSpeechDiscarded: () => {
+      if (isHandsFreeActiveRef.current) {
+        setVoiceState('listening');
+      }
+    },
+    onVadUtteranceComplete: (payload) => {
+      if (isHandsFreeActiveRef.current) {
+        void executeVoicePipeline(payload);
+      }
+    },
+    onHandsFreeIdleTimeout: () => {
+      turnIdRef.current += 1;
+      abortActiveRequest();
+      stopAudio(true);
+      isHandsFreeActiveRef.current = false;
+      setVoiceState('idle');
+    },
+    onKioskStandbyReset: () => {
+      // In KIOSK_MODE, when 30s elapses with no visitor, clear previous visitor's Q&A display
+      // and stay in 'listening' standby so the next visitor can walk up and speak immediately.
+      setTranscript('');
+      setAnswer('');
+      setMatchedFaqIds([]);
+      setMatched(null);
+      setAnswerMode(null);
+      setErrorMessage(null);
+      setAutoplayBlocked(false);
+      pendingAudioBlobRef.current = null;
+      setVoiceState('listening');
+    },
+    kioskMode: kioskModeEnabled && interactionMode === 'hands-free',
     onRecorderError: handleRecorderError,
   });
 
   useEffect(() => {
+    pauseHandsFreeFnRef.current = pauseHandsFreeListening;
+    resumeHandsFreeFnRef.current = resumeHandsFreeListening;
+    stopHandsFreeFnRef.current = stopHandsFreeSession;
+  }, [pauseHandsFreeListening, resumeHandsFreeListening, stopHandsFreeSession]);
+
+  /**
+   * Zero-Touch Kiosk Bootstrap:
+   * On page load / reload, if KIOSK_MODE is enabled and the browser has pre-authorized
+   * microphone access (or is running with Chrome kiosk flags), automatically enters
+   * continuous `listening` state so visitors can speak immediately without clicking.
+   * Never attempts to bypass browser security if permission is 'prompt' or 'denied'.
+   */
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      kioskBootstrappedRef.current ||
+      !kioskModeEnabled ||
+      interactionMode !== 'hands-free' ||
+      isHandsFreeActiveRef.current
+    ) {
+      return;
+    }
+
+    kioskBootstrappedRef.current = true;
+    let isCancelled = false;
+
+    const bootstrapZeroTouchKiosk = async () => {
+      let micPermissionState: 'granted' | 'prompt' | 'denied' | 'unknown' =
+        'unknown';
+
+      if (navigator.permissions?.query) {
+        try {
+          const status = await navigator.permissions.query({
+            name: 'microphone' as PermissionName,
+          });
+          micPermissionState = status.state;
+        } catch {
+          micPermissionState = 'unknown';
+        }
+      }
+
+      if (isCancelled) {
+        return;
+      }
+
+      const decision = evaluateKioskAutoStart({
+        kioskModeEnabled,
+        micPermissionState,
+        isAlreadyActiveOrStarting: isHandsFreeActiveRef.current,
+      });
+
+      if (decision === 'AWAITING_PERMISSION_CLICK') {
+        setErrorMessage(
+          'ไม่ได้รับอนุญาตให้ใช้ไมโครโฟน กรุณาคลิกไอคอนตั้งค่าข้างแถบ URL ของ Chrome เพื่ออนุญาตไมโครโฟน (Allow) แล้วรีโหลดหน้าเว็บ',
+        );
+        return;
+      }
+
+      if (decision !== 'STARTED_ZERO_TOUCH') {
+        return;
+      }
+
+      try {
+        await unlockAudioContext();
+        await startHandsFreeSession();
+        if (isCancelled) {
+          stopHandsFreeSession();
+          return;
+        }
+        isHandsFreeActiveRef.current = true;
+        setErrorMessage(null);
+        setVoiceState('listening');
+      } catch (err) {
+        if (isCancelled) {
+          return;
+        }
+        isHandsFreeActiveRef.current = false;
+        const message =
+          err instanceof ClientVoiceError
+            ? err.message
+            : 'กรุณากดอนุญาตการใช้ไมโครโฟนบนเบราว์เซอร์เพื่อเริ่มรับฟังเสียงอัตโนมัติ';
+        setErrorMessage(message);
+        setVoiceState('idle');
+      }
+    };
+
+    void bootstrapZeroTouchKiosk();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    interactionMode,
+    kioskModeEnabled,
+    startHandsFreeSession,
+    stopHandsFreeSession,
+    unlockAudioContext,
+  ]);
+
+  useEffect(() => {
     return () => {
       turnIdRef.current += 1;
+      isHandsFreeActiveRef.current = false;
       abortActiveRequest();
       stopAudio(true);
     };
   }, [abortActiveRequest, stopAudio]);
 
-  const handleStartRecording = useCallback(async () => {
+  const handleStartPrimaryAction = useCallback(async () => {
     turnIdRef.current += 1;
     abortActiveRequest();
     stopAudio(true);
@@ -205,7 +421,25 @@ export function VoiceChat() {
     // Unlock Web Audio API context from this direct user click gesture
     await unlockAudioContext();
 
+    if (interactionMode === 'hands-free') {
+      try {
+        await startHandsFreeSession();
+        isHandsFreeActiveRef.current = true;
+        setVoiceState('listening');
+      } catch (err) {
+        isHandsFreeActiveRef.current = false;
+        const message =
+          err instanceof ClientVoiceError
+            ? err.message
+            : 'ไม่สามารถเริ่มโหมดสนทนาต่อเนื่องได้ กรุณาตรวจสอบสิทธิ์ไมโครโฟน';
+        setErrorMessage(message);
+        setVoiceState('error');
+      }
+      return;
+    }
+
     try {
+      isHandsFreeActiveRef.current = false;
       await startRecording();
       setVoiceState('recording');
     } catch (err) {
@@ -216,20 +450,99 @@ export function VoiceChat() {
       setErrorMessage(message);
       setVoiceState('error');
     }
-  }, [abortActiveRequest, startRecording, stopAudio, unlockAudioContext]);
+  }, [
+    abortActiveRequest,
+    interactionMode,
+    startHandsFreeSession,
+    startRecording,
+    stopAudio,
+    unlockAudioContext,
+  ]);
+
+  const handleEndHandsFreeSession = useCallback(() => {
+    turnIdRef.current += 1;
+    isHandsFreeActiveRef.current = false;
+    abortActiveRequest();
+    stopHandsFreeSession();
+    stopAudio(true);
+    pendingAudioBlobRef.current = null;
+    setAutoplayBlocked(false);
+    setErrorMessage(null);
+    setVoiceState('idle');
+  }, [abortActiveRequest, stopAudio, stopHandsFreeSession]);
+
+  const handleToggleInteractionMode = useCallback(
+    async (nextMode: VoiceInteractionMode) => {
+      if (nextMode === interactionMode) {
+        if (nextMode === 'hands-free' && !isHandsFreeActiveRef.current) {
+          await handleStartPrimaryAction();
+        }
+        return;
+      }
+
+      if (nextMode === 'push-to-talk') {
+        handleEndHandsFreeSession();
+        setInteractionMode('push-to-talk');
+        return;
+      }
+
+      setInteractionMode('hands-free');
+      turnIdRef.current += 1;
+      abortActiveRequest();
+      stopAudio(true);
+      pendingAudioBlobRef.current = null;
+      setAutoplayBlocked(false);
+      setErrorMessage(null);
+
+      try {
+        await unlockAudioContext();
+        await startHandsFreeSession();
+        isHandsFreeActiveRef.current = true;
+        setVoiceState('listening');
+      } catch (err) {
+        isHandsFreeActiveRef.current = false;
+        const message =
+          err instanceof ClientVoiceError
+            ? err.message
+            : 'ไม่สามารถเริ่มโหมดสนทนาต่อเนื่องได้ กรุณาตรวจสอบสิทธิ์ไมโครโฟน';
+        setErrorMessage(message);
+        setVoiceState('error');
+      }
+    },
+    [
+      abortActiveRequest,
+      handleEndHandsFreeSession,
+      handleStartPrimaryAction,
+      interactionMode,
+      startHandsFreeSession,
+      stopAudio,
+      unlockAudioContext,
+    ],
+  );
 
   const handleStopAndSubmit = useCallback(async () => {
     await unlockAudioContext();
+    if (isHandsFreeActiveRef.current) {
+      // In Hands-Free mode, clicking the mic while actively recording forces immediate turn submission
+      pauseHandsFreeListening();
+      return;
+    }
     const payload = await stopAndSubmitRecording();
     if (!payload) {
       setVoiceState((prev) => (prev === 'recording' ? 'idle' : prev));
       return;
     }
     await executeVoicePipeline(payload);
-  }, [executeVoicePipeline, stopAndSubmitRecording, unlockAudioContext]);
+  }, [
+    executeVoicePipeline,
+    pauseHandsFreeListening,
+    stopAndSubmitRecording,
+    unlockAudioContext,
+  ]);
 
   const handleCancelRecording = useCallback(() => {
     turnIdRef.current += 1;
+    isHandsFreeActiveRef.current = false;
     abortActiveRequest();
     cancelRecording();
     stopAudio(true);
@@ -242,16 +555,26 @@ export function VoiceChat() {
     abortActiveRequest();
     stopAudio(true);
     setErrorMessage(null);
-    setVoiceState('idle');
-  }, [abortActiveRequest, stopAudio]);
+    if (isHandsFreeActiveRef.current) {
+      setVoiceState('listening');
+      resumeHandsFreeListening(false);
+    } else {
+      setVoiceState('idle');
+    }
+  }, [abortActiveRequest, resumeHandsFreeListening, stopAudio]);
 
   const handleStopAudio = useCallback(() => {
     turnIdRef.current += 1;
     stopAudio(true);
     pendingAudioBlobRef.current = null;
     setAutoplayBlocked(false);
-    setVoiceState('idle');
-  }, [stopAudio]);
+    if (isHandsFreeActiveRef.current) {
+      setVoiceState('listening');
+      resumeHandsFreeListening(true);
+    } else {
+      setVoiceState('idle');
+    }
+  }, [resumeHandsFreeListening, stopAudio]);
 
   const handlePlayBlockedAudio = useCallback(async () => {
     const blob = pendingAudioBlobRef.current;
@@ -259,6 +582,9 @@ export function VoiceChat() {
       return;
     }
     const currentTurnId = ++turnIdRef.current;
+    if (isHandsFreeActiveRef.current) {
+      pauseHandsFreeListening();
+    }
     setAutoplayBlocked(false);
     setErrorMessage(null);
     try {
@@ -271,10 +597,19 @@ export function VoiceChat() {
       if (outcome === 'completed' || outcome === 'stopped') {
         pendingAudioBlobRef.current = null;
       }
-      setVoiceState('idle');
+      if (isHandsFreeActiveRef.current) {
+        setVoiceState('listening');
+        resumeHandsFreeListening(true);
+      } else {
+        setVoiceState('idle');
+      }
     } catch (err) {
       if (currentTurnId !== turnIdRef.current) {
         return;
+      }
+      if (isHandsFreeActiveRef.current) {
+        isHandsFreeActiveRef.current = false;
+        stopHandsFreeSession();
       }
       const message =
         err instanceof ClientVoiceError
@@ -283,7 +618,13 @@ export function VoiceChat() {
       setErrorMessage(message);
       setVoiceState('error');
     }
-  }, [playAudioBlob, unlockAudioContext]);
+  }, [
+    pauseHandsFreeListening,
+    playAudioBlob,
+    resumeHandsFreeListening,
+    stopHandsFreeSession,
+    unlockAudioContext,
+  ]);
 
   const handleRetry = useCallback(() => {
     if (!lastRecordingRef.current) {
@@ -293,6 +634,13 @@ export function VoiceChat() {
     }
     void executeVoicePipeline(lastRecordingRef.current, true);
   }, [executeVoicePipeline]);
+
+  const effectiveWaveAmplitude =
+    voiceState === 'speaking'
+      ? amplitude
+      : voiceState === 'listening' || voiceState === 'recording'
+        ? micAmplitude
+        : 0;
 
   return (
     <section className="flex min-h-screen w-full flex-col overflow-x-hidden bg-[#faf7f2]">
@@ -374,20 +722,25 @@ export function VoiceChat() {
 
       {/* Bottom Cream Control Area (~30% on desktop, compact with minimal wasted space) */}
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-between gap-2 bg-[#faf7f2] px-4 pt-2 pb-3 sm:px-8 sm:pt-3 sm:pb-4">
-        {/* Voice Controls & Soundwave Bars */}
+        {/* Voice Controls & Continuous Stream Soundwave Bars */}
         <div className="my-auto w-full py-1">
           <MicrophoneButton
             voiceState={voiceState}
-            amplitude={amplitude}
+            interactionMode={interactionMode}
+            isHandsFreeSessionActive={isHandsFreeSessionActive}
+            amplitude={effectiveWaveAmplitude}
             elapsedSeconds={elapsedSeconds}
             maxRecordingSeconds={maxRecordingSeconds}
             autoplayBlocked={autoplayBlocked}
-            onStartRecording={handleStartRecording}
+            onStartRecording={handleStartPrimaryAction}
             onStopAndSubmit={handleStopAndSubmit}
             onCancelRecording={handleCancelRecording}
             onStopAudio={handleStopAudio}
             onCancelProcessing={handleCancelProcessing}
             onPlayBlockedAudio={handlePlayBlockedAudio}
+            onToggleMode={(mode) => {
+              void handleToggleInteractionMode(mode);
+            }}
           />
         </div>
 

@@ -63,6 +63,12 @@ function isMissingTableError(error: {
   );
 }
 
+let hasLoggedMissingMigrationTableNotice = false;
+
+export function resetMissingMigrationNoticeForTesting(): void {
+  hasLoggedMissingMigrationTableNotice = false;
+}
+
 /**
  * Ensures the persistent FAQ audio bucket (`mascot-faq-audio`) exists in Supabase Storage.
  * Safe and idempotent to call from admin setup/reconciliation scripts.
@@ -119,29 +125,23 @@ export function createSupabaseFaqAudioStorageAdapter(): FaqAudioStorageAdapter {
         return data as FaqAudioAssetRecord;
       }
 
-      if (error && !isMissingTableError(error)) {
-        throw new Error(
-          `Failed to query faq_audio_assets for faq_id=${faqId}: ${error.message}`,
-        );
-      }
+      if (error) {
+        if (!isMissingTableError(error)) {
+          throw new Error(
+            `Failed to query faq_audio_assets for faq_id=${faqId} (code=${error.code ?? 'UNKNOWN'}): ${error.message}`,
+          );
+        }
 
-      // Fallback: check content-addressed sidecar JSON in Storage bucket
-      const bucketName = getFaqAudioBucketName();
-      const metaPath = buildFaqAudioMetadataObjectPath(faqId, contentHash);
-      const { data: blobData, error: downloadErr } = await supabase.storage
-        .from(bucketName)
-        .download(metaPath);
-
-      if (downloadErr || !blobData) {
+        if (!hasLoggedMissingMigrationTableNotice) {
+          hasLoggedMissingMigrationTableNotice = true;
+          console.info(
+            `[faq-audio.repository] Table "public.${FAQ_AUDIO_METADATA_TABLE}" is not yet migrated (code=${error.code ?? 'PGRST205'}). Falling back safely to dynamic TTS / sidecar lookup.`,
+          );
+        }
         return null;
       }
 
-      try {
-        const text = await blobData.text();
-        return JSON.parse(text) as FaqAudioAssetRecord;
-      } catch {
-        return null;
-      }
+      return null;
     },
 
     async upsertMetadata(

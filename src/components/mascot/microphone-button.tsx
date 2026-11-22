@@ -1,9 +1,11 @@
 'use client';
 
-import type { VoiceState } from '@/types/voice';
+import type { VoiceInteractionMode, VoiceState } from '@/types/voice';
 
 interface MicrophoneButtonProps {
   voiceState: VoiceState;
+  interactionMode?: VoiceInteractionMode;
+  isHandsFreeSessionActive?: boolean;
   amplitude?: number;
   elapsedSeconds: number;
   maxRecordingSeconds: number;
@@ -14,10 +16,15 @@ interface MicrophoneButtonProps {
   onStopAudio: () => void;
   onCancelProcessing: () => void;
   onPlayBlockedAudio: () => void;
+  onToggleMode?: (mode: VoiceInteractionMode) => void;
 }
 
 const LEFT_WAVE_BARS = [4, 4, 14, 9, 26, 16, 36, 22, 14, 9, 5] as const;
 const RIGHT_WAVE_BARS = [5, 9, 14, 22, 36, 16, 26, 9, 14, 4, 4] as const;
+const FULL_STREAM_WAVE_BARS = [
+  5, 8, 13, 20, 12, 28, 18, 38, 25, 46, 30, 54, 34, 46, 25, 38, 18, 28, 12, 20,
+  13, 8, 5,
+] as const;
 
 function formatTimer(seconds: number): string {
   const mins = Math.floor(seconds / 60)
@@ -29,6 +36,8 @@ function formatTimer(seconds: number): string {
 
 export function MicrophoneButton({
   voiceState,
+  interactionMode = 'hands-free',
+  isHandsFreeSessionActive = false,
   amplitude = 0,
   elapsedSeconds,
   maxRecordingSeconds,
@@ -39,19 +48,29 @@ export function MicrophoneButton({
   onStopAudio,
   onCancelProcessing,
   onPlayBlockedAudio,
+  onToggleMode,
 }: MicrophoneButtonProps) {
+  const isHandsFree = interactionMode === 'hands-free';
+  const showStreamWaveformOnly = isHandsFree;
+
   const isProcessing =
     voiceState === 'transcribing' ||
     voiceState === 'thinking' ||
     voiceState === 'synthesizing';
 
-  const isWaveActive = voiceState === 'recording' || voiceState === 'speaking';
+  const isWaveActive =
+    voiceState === 'listening' ||
+    voiceState === 'recording' ||
+    voiceState === 'speaking';
+
   const dynamicScale =
     voiceState === 'speaking'
       ? 1 + Math.min(0.85, amplitude * 1.4)
       : voiceState === 'recording'
-        ? 1.2
-        : 1;
+        ? 1.22 + Math.min(0.55, amplitude * 1.1)
+        : voiceState === 'listening'
+          ? 1.06 + Math.min(0.45, amplitude * 0.95)
+          : 1;
 
   const handlePrimaryClick = () => {
     if (voiceState === 'idle' || voiceState === 'error') {
@@ -66,150 +85,256 @@ export function MicrophoneButton({
   const primaryTestId =
     voiceState === 'recording'
       ? 'stop-and-submit-btn'
-      : voiceState === 'speaking'
-        ? 'stop-audio-btn'
-        : isProcessing
-          ? 'processing-indicator-btn'
-          : 'start-recording-btn';
+      : voiceState === 'listening'
+        ? 'listening-stream-wave'
+        : voiceState === 'speaking'
+          ? 'stop-audio-btn'
+          : isProcessing
+            ? 'processing-indicator-btn'
+            : 'start-recording-btn';
 
   const primaryLabel =
-    voiceState === 'recording'
-      ? 'กดเพื่อส่งคำถาม'
-      : isProcessing
-        ? 'กำลังประมวลผล...'
-        : voiceState === 'speaking'
-          ? 'กดเพื่อหยุดเสียง'
-          : 'กดเพื่อพูด';
+    voiceState === 'listening'
+      ? 'กำลังฟัง... พูดได้เลย'
+      : voiceState === 'recording'
+        ? showStreamWaveformOnly
+          ? `กำลังฟังเสียงพูด... (${formatTimer(elapsedSeconds)})`
+          : 'กดเพื่อส่งคำถาม'
+        : isProcessing
+          ? 'กำลังประมวลผล...'
+          : voiceState === 'speaking'
+            ? showStreamWaveformOnly
+              ? 'มาสคอตกำลังพูด'
+              : 'กดเพื่อหยุดเสียง'
+            : showStreamWaveformOnly
+              ? 'พร้อมรับฟังเสียงพูด...'
+              : 'กดเพื่อพูด';
 
   const outerRingClass =
     voiceState === 'recording'
       ? 'bg-rose-400 shadow-[0_0_24px_rgba(244,63,94,0.45)]'
-      : voiceState === 'speaking'
-        ? 'bg-[#5ce1d2] shadow-[0_0_22px_rgba(45,212,191,0.45)]'
-        : 'bg-[#7ce2d4] shadow-[0_6px_18px_rgba(15,43,72,0.14)]';
+      : voiceState === 'listening'
+        ? 'bg-emerald-400 shadow-[0_0_22px_rgba(16,185,129,0.42)]'
+        : voiceState === 'speaking'
+          ? 'bg-[#5ce1d2] shadow-[0_0_22px_rgba(45,212,191,0.45)]'
+          : 'bg-[#7ce2d4] shadow-[0_6px_18px_rgba(15,43,72,0.14)]';
 
   const waveBarColor =
     voiceState === 'recording'
-      ? 'bg-rose-400'
-      : voiceState === 'speaking'
-        ? 'bg-[#3bc4bd]'
-        : 'bg-[#9ab3c9]';
+      ? 'bg-rose-500'
+      : voiceState === 'listening'
+        ? 'bg-emerald-500'
+        : voiceState === 'speaking'
+          ? 'bg-[#20b5ad]'
+          : isProcessing
+            ? 'bg-sky-500'
+            : 'bg-[#3bc4bd]';
 
   return (
     <div className="flex w-full flex-col items-center">
-      {/* Soundwave Bars + Central Circular Microphone Button */}
-      <div className="flex items-center justify-center gap-5 sm:gap-7">
-        {/* Left Equalizer Bars */}
+      {showStreamWaveformOnly ? (
+        /* Continuous Stream Soundwave Visualizer (No Circular Mic Button) */
         <div
-          aria-hidden="true"
-          className="flex h-12 items-center gap-[5px] sm:gap-[6px]"
-        >
-          {LEFT_WAVE_BARS.map((baseHeight, idx) => {
-            const height = isWaveActive
-              ? Math.max(
-                  4,
-                  Math.round(
-                    baseHeight *
-                      (idx % 2 === 0
-                        ? dynamicScale
-                        : 0.85 + dynamicScale * 0.2),
-                  ),
-                )
-              : baseHeight;
-            return (
-              <span
-                key={`left-bar-${idx}`}
-                className={`w-[4px] rounded-full transition-all duration-100 ${waveBarColor} ${
-                  voiceState === 'recording' ? 'animate-pulse' : ''
-                }`}
-                style={{ height: `${height}px` }}
-              />
-            );
-          })}
-        </div>
-
-        {/* Center Circular Microphone Button */}
-        <button
-          type="button"
           data-testid={primaryTestId}
-          disabled={isProcessing}
-          onClick={handlePrimaryClick}
-          aria-label={primaryLabel}
-          className={`group relative flex h-[104px] w-[104px] shrink-0 items-center justify-center rounded-full p-[6px] transition-transform duration-150 focus:ring-4 focus:ring-[#7ce2d4]/60 focus:outline-none sm:h-[112px] sm:w-[112px] lg:h-[clamp(90px,12.5dvh,124px)] lg:w-[clamp(90px,12.5dvh,124px)] ${outerRingClass} ${
-            isProcessing
-              ? 'cursor-not-allowed opacity-85'
-              : 'cursor-pointer hover:scale-[1.03] active:scale-[0.98]'
+          onClick={
+            voiceState === 'idle' || voiceState === 'error'
+              ? onStartRecording
+              : undefined
+          }
+          className={`flex h-[84px] items-center justify-center gap-[5px] px-6 py-2 sm:h-[96px] sm:gap-[7px] ${
+            voiceState === 'idle' || voiceState === 'error'
+              ? 'cursor-pointer'
+              : ''
           }`}
         >
-          <span className="flex h-full w-full items-center justify-center rounded-full bg-linear-to-b from-[#1b406c] via-[#122f54] to-[#0a1f3a] text-white shadow-inner">
-            {isProcessing ? (
-              <span className="h-9 w-9 animate-spin rounded-full border-4 border-white/85 border-t-transparent" />
-            ) : (
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                className="h-11 w-11 text-white transition-transform group-hover:scale-105 sm:h-12 sm:w-12 lg:h-[46%] lg:w-[46%]"
-              >
-                {/* Solid White Capsule Mic Head */}
-                <rect
-                  x="8.5"
-                  y="3"
-                  width="7"
-                  height="11.5"
-                  rx="3.5"
-                  fill="currentColor"
-                />
-                {/* U-Shaped Cradle & Base */}
-                <path
-                  d="M6 10.75a6 6 0 0 0 12 0M12 16.75v3.75M8.75 20.5h6.5"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.1"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            )}
-          </span>
-        </button>
-
-        {/* Right Equalizer Bars */}
-        <div
-          aria-hidden="true"
-          className="flex h-12 items-center gap-[5px] sm:gap-[6px]"
-        >
-          {RIGHT_WAVE_BARS.map((baseHeight, idx) => {
+          {FULL_STREAM_WAVE_BARS.map((baseHeight, idx) => {
+            const idleBreathing = idx % 2 === 0 ? 1.05 : 0.92;
             const height = isWaveActive
               ? Math.max(
-                  4,
+                  6,
                   Math.round(
                     baseHeight *
-                      (idx % 2 === 1
+                      (idx % 3 === 0
                         ? dynamicScale
-                        : 0.85 + dynamicScale * 0.2),
+                        : idx % 2 === 0
+                          ? 0.9 + dynamicScale * 0.35
+                          : 0.8 + dynamicScale * 0.2),
                   ),
                 )
-              : baseHeight;
+              : isProcessing
+                ? Math.max(8, Math.round(baseHeight * 0.65))
+                : Math.max(6, Math.round(baseHeight * idleBreathing));
+
             return (
               <span
-                key={`right-bar-${idx}`}
-                className={`w-[4px] rounded-full transition-all duration-100 ${waveBarColor} ${
-                  voiceState === 'recording' ? 'animate-pulse' : ''
+                key={`stream-bar-${idx}`}
+                className={`w-[4px] rounded-full transition-all duration-100 sm:w-[5px] ${waveBarColor} ${
+                  voiceState === 'listening' ||
+                  voiceState === 'recording' ||
+                  isProcessing
+                    ? 'animate-pulse'
+                    : ''
                 }`}
-                style={{ height: `${height}px` }}
+                style={{
+                  height: `${height}px`,
+                  animationDelay: `${(idx % 6) * 110}ms`,
+                }}
               />
             );
           })}
         </div>
-      </div>
+      ) : (
+        /* Push-to-Talk Mode: Soundwave Bars + Central Circular Microphone Button */
+        <div className="flex items-center justify-center gap-5 sm:gap-7">
+          {/* Left Equalizer Bars */}
+          <div
+            aria-hidden="true"
+            className="flex h-12 items-center gap-[5px] sm:gap-[6px]"
+          >
+            {LEFT_WAVE_BARS.map((baseHeight, idx) => {
+              const height = isWaveActive
+                ? Math.max(
+                    4,
+                    Math.round(
+                      baseHeight *
+                        (idx % 2 === 0
+                          ? dynamicScale
+                          : 0.85 + dynamicScale * 0.2),
+                    ),
+                  )
+                : baseHeight;
+              return (
+                <span
+                  key={`left-bar-${idx}`}
+                  className={`w-[4px] rounded-full transition-all duration-100 ${waveBarColor} ${
+                    voiceState === 'recording' ? 'animate-pulse' : ''
+                  }`}
+                  style={{ height: `${height}px` }}
+                />
+              );
+            })}
+          </div>
 
-      {/* Main Call-to-Action Text ("กดเพื่อพูด") */}
-      <p className="mt-2.5 text-[24px] leading-tight font-bold tracking-tight text-[#0f2942] sm:text-[26px] lg:mt-2 lg:text-[clamp(22px,2.8dvh,28px)]">
+          {/* Center Circular Microphone Button */}
+          <button
+            type="button"
+            data-testid={primaryTestId}
+            disabled={isProcessing}
+            onClick={handlePrimaryClick}
+            aria-label={primaryLabel}
+            className={`group relative flex h-[104px] w-[104px] shrink-0 items-center justify-center rounded-full p-[6px] transition-transform duration-150 focus:ring-4 focus:ring-[#7ce2d4]/60 focus:outline-none sm:h-[112px] sm:w-[112px] lg:h-[clamp(90px,12.5dvh,124px)] lg:w-[clamp(90px,12.5dvh,124px)] ${outerRingClass} ${
+              isProcessing
+                ? 'cursor-not-allowed opacity-85'
+                : 'cursor-pointer hover:scale-[1.03] active:scale-[0.98]'
+            }`}
+          >
+            <span className="flex h-full w-full items-center justify-center rounded-full bg-linear-to-b from-[#1b406c] via-[#122f54] to-[#0a1f3a] text-white shadow-inner">
+              {isProcessing ? (
+                <span className="h-9 w-9 animate-spin rounded-full border-4 border-white/85 border-t-transparent" />
+              ) : (
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  className="h-11 w-11 text-white transition-transform group-hover:scale-105 sm:h-12 sm:w-12 lg:h-[46%] lg:w-[46%]"
+                >
+                  <rect
+                    x="8.5"
+                    y="3"
+                    width="7"
+                    height="11.5"
+                    rx="3.5"
+                    fill="currentColor"
+                  />
+                  <path
+                    d="M6 10.75a6 6 0 0 0 12 0M12 16.75v3.75M8.75 20.5h6.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.1"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </span>
+          </button>
+
+          {/* Right Equalizer Bars */}
+          <div
+            aria-hidden="true"
+            className="flex h-12 items-center gap-[5px] sm:gap-[6px]"
+          >
+            {RIGHT_WAVE_BARS.map((baseHeight, idx) => {
+              const height = isWaveActive
+                ? Math.max(
+                    4,
+                    Math.round(
+                      baseHeight *
+                        (idx % 2 === 1
+                          ? dynamicScale
+                          : 0.85 + dynamicScale * 0.2),
+                    ),
+                  )
+                : baseHeight;
+              return (
+                <span
+                  key={`right-bar-${idx}`}
+                  className={`w-[4px] rounded-full transition-all duration-100 ${waveBarColor} ${
+                    voiceState === 'recording' ? 'animate-pulse' : ''
+                  }`}
+                  style={{ height: `${height}px` }}
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Main Status Text */}
+      <p
+        data-testid="primary-cta-label"
+        className="mt-1.5 text-[22px] leading-tight font-bold tracking-tight text-[#0f2942] sm:text-[24px] lg:text-[clamp(20px,2.5dvh,26px)]"
+      >
         {primaryLabel}
       </p>
 
-      {/* Secondary Contextual Controls (Recording Timer / Cancel / Blocked Audio) */}
-      {voiceState === 'recording' && (
+      {/* 2-State Mode Toggle Pill (Hands-Free Stream vs Push-to-Talk) */}
+      {onToggleMode && (
+        <div
+          role="group"
+          aria-label="โหมดการสนทนา"
+          className="mt-2.5 inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 p-1 text-xs shadow-2xs"
+        >
+          <button
+            type="button"
+            data-testid="mode-handsfree-btn"
+            disabled={isProcessing}
+            onClick={() => onToggleMode('hands-free')}
+            className={`rounded-full px-3.5 py-1.5 font-semibold transition ${
+              isHandsFree
+                ? 'bg-[#12679B] text-white shadow-2xs'
+                : 'text-slate-600 hover:text-slate-900'
+            } ${isProcessing ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+          >
+            สนทนาต่อเนื่อง (Hands-Free)
+          </button>
+          <button
+            type="button"
+            data-testid="mode-ptt-btn"
+            disabled={isProcessing}
+            onClick={() => onToggleMode('push-to-talk')}
+            className={`rounded-full px-3.5 py-1.5 font-semibold transition ${
+              !isHandsFree
+                ? 'bg-[#12679B] text-white shadow-2xs'
+                : 'text-slate-600 hover:text-slate-900'
+            } ${isProcessing ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+          >
+            กดเพื่อพูด (Push-to-Talk)
+          </button>
+        </div>
+      )}
+
+      {/* Secondary Contextual Controls for Push-to-Talk Recording */}
+      {!isHandsFreeSessionActive && voiceState === 'recording' && (
         <div className="mt-2 flex flex-wrap items-center justify-center gap-2.5">
           <div
             data-testid="recording-timer"

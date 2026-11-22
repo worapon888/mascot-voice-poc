@@ -13,6 +13,7 @@ interface MascotAvatarProps {
 
 const STATE_BADGE_STYLES: Record<VoiceState, string> = {
   idle: 'bg-[#d4f2e0] text-[#0f3123]',
+  listening: 'bg-emerald-100 text-emerald-900',
   recording: 'bg-rose-100 text-rose-900',
   transcribing: 'bg-sky-100 text-sky-900',
   thinking: 'bg-indigo-100 text-indigo-900',
@@ -23,6 +24,7 @@ const STATE_BADGE_STYLES: Record<VoiceState, string> = {
 
 const STATE_DOT_STYLES: Record<VoiceState, string> = {
   idle: 'bg-[#17823c]',
+  listening: 'bg-emerald-600 animate-ping',
   recording: 'bg-rose-600 animate-ping',
   transcribing: 'bg-sky-600 animate-pulse',
   thinking: 'bg-indigo-600 animate-pulse',
