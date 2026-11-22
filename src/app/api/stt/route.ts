@@ -80,16 +80,22 @@ export async function POST(
     const arrayBuffer = await audioEntry.arrayBuffer();
     const audioBuffer = Buffer.from(arrayBuffer);
 
+    const t0 = performance.now();
     const transcript = await transcribeAudioBuffer(
       audioBuffer,
       audioEntry.type,
     );
+    const sttLatencyMs = Math.round(performance.now() - t0);
 
     return NextResponse.json(
       { transcript },
       {
         status: 200,
-        headers: NO_STORE_HEADERS,
+        headers: {
+          ...NO_STORE_HEADERS,
+          'X-STT-Latency-Ms': String(sttLatencyMs),
+          'X-OpenAI-STT-Called': '1',
+        },
       },
     );
   } catch (error) {

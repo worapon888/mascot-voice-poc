@@ -7,7 +7,7 @@ import {
   NO_STORE_HEADERS,
 } from '@/lib/api/errors';
 import { validateAnswerRequest } from '@/lib/validations/voice';
-import { generateGroundedAnswer } from '@/services/answer.service';
+import { generateGroundedAnswerWithMetrics } from '@/services/answer.service';
 import type { AnswerResponse, ApiErrorResponse } from '@/types/api';
 
 export const runtime = 'nodejs';
@@ -35,11 +35,22 @@ export async function POST(
     }
 
     const { transcript } = validateAnswerRequest(rawBody);
-    const result = await generateGroundedAnswer(transcript);
+    const { response, metrics } =
+      await generateGroundedAnswerWithMetrics(transcript);
 
-    return NextResponse.json(result, {
+    return NextResponse.json(response, {
       status: 200,
-      headers: NO_STORE_HEADERS,
+      headers: {
+        ...NO_STORE_HEADERS,
+        'X-FAQ-Retrieval-Latency-Ms': String(metrics.faqRetrievalLatencyMs),
+        'X-LLM-Latency-Ms': String(metrics.llmLatencyMs),
+        'X-OpenAI-LLM-Called': metrics.llmCalled ? '1' : '0',
+        'X-FAQ-Fast-Path': metrics.fastPathBypassedLlm ? '1' : '0',
+        'X-Persistent-Audio-Status': metrics.persistentAudioStatus,
+        'X-Persistent-Audio-Lookup-Ms': String(
+          metrics.persistentAudioLookupLatencyMs,
+        ),
+      },
     });
   } catch (error) {
     return handleApiRouteError(error);

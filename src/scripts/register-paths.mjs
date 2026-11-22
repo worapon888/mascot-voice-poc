@@ -29,6 +29,12 @@ function resolveWithExtensions(candidatePath) {
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === 'server-only') {
+      return {
+        url: 'data:text/javascript,export default {};',
+        shortCircuit: true,
+      };
+    }
     if (specifier === 'next/server') {
       return nextResolve('next/server.js', context);
     }

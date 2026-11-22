@@ -10,16 +10,51 @@ export interface SttResponse {
 export type AnswerMode =
   'FAQ_GROUNDED' | 'GENERAL_GUIDANCE' | 'ORGANIZATION_INFO_UNKNOWN';
 
+export interface AnswerAudioRef {
+  faqId: number;
+  contentHash: string;
+  audioUrl: string;
+  objectPath: string;
+  mimeType: 'audio/mpeg';
+  byteLength: number;
+}
+
 export interface AnswerResponse {
   answer: string;
   faqIds: number[];
   matched: boolean;
   answerMode?: AnswerMode;
+  audioRef?: AnswerAudioRef;
+}
+
+export type FaqWebhookEventType = 'INSERT' | 'UPDATE' | 'DELETE';
+
+export interface SupabaseFaqWebhookPayload {
+  type: FaqWebhookEventType;
+  table: string;
+  schema: string;
+  record: {
+    id: number;
+    question: string;
+    answer: string;
+    keywords?: string[];
+    is_active: boolean;
+    created_at?: string;
+  } | null;
+  old_record: {
+    id: number;
+    question: string;
+    answer: string;
+    keywords?: string[];
+    is_active: boolean;
+    created_at?: string;
+  } | null;
 }
 
 export type ApiErrorCode =
   | 'DEMO_DISABLED'
   | 'METHOD_NOT_ALLOWED'
+  | 'UNAUTHORIZED'
   | 'INVALID_CONTENT_TYPE'
   | 'INVALID_REQUEST'
   | 'MISSING_AUDIO'
@@ -28,6 +63,7 @@ export type ApiErrorCode =
   | 'EMPTY_TRANSCRIPT'
   | 'TEXT_TOO_LONG'
   | 'DATABASE_ERROR'
+  | 'STORAGE_ERROR'
   | 'RATE_LIMITED'
   | 'UPSTREAM_TIMEOUT'
   | 'UPSTREAM_PROVIDER_ERROR'

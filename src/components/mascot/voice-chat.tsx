@@ -11,9 +11,8 @@ import {
 } from '@/hooks/use-voice-recorder';
 import {
   ClientVoiceError,
-  requestGroundedAnswer,
-  requestSpeechToText,
-  requestTextToSpeechBlob,
+  executeSmartPipelineStages,
+  type RetrySessionSnapshot,
 } from '@/lib/voice/api-client';
 import type { AnswerMode } from '@/types/api';
 import type { VoiceState } from '@/types/voice';
@@ -33,6 +32,7 @@ export function VoiceChat() {
   const turnIdRef = useRef<number>(0);
   const abortControllerRef = useRef<AbortController | null>(null);
   const lastRecordingRef = useRef<RecordedAudioPayload | null>(null);
+  const retrySessionRef = useRef<RetrySessionSnapshot | null>(null);
   const pendingAudioBlobRef = useRef<Blob | null>(null);
 
   const {
@@ -51,7 +51,7 @@ export function VoiceChat() {
   }, []);
 
   const executeVoicePipeline = useCallback(
-    async (recordingPayload: RecordedAudioPayload) => {
+    async (recordingPayload: RecordedAudioPayload, isRetry = false) => {
       abortActiveRequest();
       stopAudio(true);
 
@@ -60,52 +60,62 @@ export function VoiceChat() {
       abortControllerRef.current = controller;
 
       lastRecordingRef.current = recordingPayload;
+      if (
+        !isRetry ||
+        !retrySessionRef.current ||
+        retrySessionRef.current.recording !== recordingPayload
+      ) {
+        retrySessionRef.current = {
+          recording: recordingPayload,
+          transcript: null,
+          answerResult: null,
+          ttsBlob: null,
+        };
+      }
+
       setHasRetryPayload(true);
       pendingAudioBlobRef.current = null;
       setAutoplayBlocked(false);
       setErrorMessage(null);
 
       try {
-        // Step A: Speech-to-Text (/api/stt)
-        setVoiceState('transcribing');
-        const sttResult = await requestSpeechToText(
-          recordingPayload.blob,
-          recordingPayload.mimeType,
-          controller.signal,
-        );
-        if (currentTurnId !== turnIdRef.current) {
-          return;
-        }
-        setTranscript(sttResult.transcript);
+        const stageResult = await executeSmartPipelineStages({
+          recordingPayload,
+          existingSession: retrySessionRef.current,
+          isRetry,
+          isStaleTurn: () => currentTurnId !== turnIdRef.current,
+          signal: controller.signal,
+          onStateChange: (nextState) => {
+            if (currentTurnId === turnIdRef.current) {
+              setVoiceState(nextState);
+            }
+          },
+          onTranscriptReady: (recognizedText) => {
+            if (currentTurnId === turnIdRef.current) {
+              setTranscript(recognizedText);
+            }
+          },
+          onAnswerReady: (answerResult) => {
+            if (currentTurnId === turnIdRef.current) {
+              setAnswer(answerResult.answer);
+              setMatchedFaqIds(answerResult.faqIds);
+              setMatched(answerResult.matched);
+              setAnswerMode(
+                answerResult.answerMode ??
+                  (answerResult.matched
+                    ? 'FAQ_GROUNDED'
+                    : 'ORGANIZATION_INFO_UNKNOWN'),
+              );
+            }
+          },
+        });
 
-        // Step B: Grounded FAQ Answer (/api/answer)
-        setVoiceState('thinking');
-        const answerResult = await requestGroundedAnswer(
-          sttResult.transcript,
-          controller.signal,
-        );
-        if (currentTurnId !== turnIdRef.current) {
+        if (!stageResult || currentTurnId !== turnIdRef.current) {
           return;
         }
-        setAnswer(answerResult.answer);
-        setMatchedFaqIds(answerResult.faqIds);
-        setMatched(answerResult.matched);
-        setAnswerMode(
-          answerResult.answerMode ??
-            (answerResult.matched
-              ? 'FAQ_GROUNDED'
-              : 'ORGANIZATION_INFO_UNKNOWN'),
-        );
 
-        // Step C: Text-to-Speech (/api/tts)
-        setVoiceState('synthesizing');
-        const ttsBlob = await requestTextToSpeechBlob(
-          answerResult.answer,
-          controller.signal,
-        );
-        if (currentTurnId !== turnIdRef.current) {
-          return;
-        }
+        retrySessionRef.current = stageResult.session;
+        const ttsBlob = stageResult.ttsBlob;
 
         // Step D: Audio Playback + Real Web Audio API Lip-Sync
         setVoiceState('speaking');
@@ -281,7 +291,7 @@ export function VoiceChat() {
       setVoiceState('idle');
       return;
     }
-    void executeVoicePipeline(lastRecordingRef.current);
+    void executeVoicePipeline(lastRecordingRef.current, true);
   }, [executeVoicePipeline]);
 
   return (

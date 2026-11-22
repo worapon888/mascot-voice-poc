@@ -10,6 +10,55 @@ const SMOOTHING_ALPHA = 0.45;
 
 export type PlayAudioOutcome = 'completed' | 'stopped' | 'autoplay-blocked';
 
+/**
+ * Pure helper that maps an array of unsigned 8-bit time-domain samples (centered at 128)
+ * and the previous smoothed RMS value into the next smoothed RMS, normalized amplitude (0..1),
+ * and discrete Mascot mouth frame ('closed' | 'small' | 'open').
+ */
+export function computeMouthFrameFromSamples(
+  timeDomainData: Uint8Array,
+  previousSmoothedRms: number,
+): {
+  rawRms: number;
+  smoothedRms: number;
+  amplitude: number;
+  mouthFrame: MouthFrame;
+} {
+  const bufferLength = timeDomainData.length;
+  if (bufferLength === 0) {
+    return {
+      rawRms: 0,
+      smoothedRms: 0,
+      amplitude: 0,
+      mouthFrame: 'closed',
+    };
+  }
+
+  let sumSquares = 0;
+  for (let i = 0; i < bufferLength; i++) {
+    const normalized = (timeDomainData[i] - 128) / 128;
+    sumSquares += normalized * normalized;
+  }
+  const rawRms = Math.sqrt(sumSquares / bufferLength);
+  const smoothedRms =
+    previousSmoothedRms * (1 - SMOOTHING_ALPHA) + rawRms * SMOOTHING_ALPHA;
+  const amplitude = Math.min(1, smoothedRms * 10);
+
+  let mouthFrame: MouthFrame = 'closed';
+  if (smoothedRms >= WIDE_OPEN_RMS_THRESHOLD) {
+    mouthFrame = 'open';
+  } else if (smoothedRms >= SILENCE_RMS_THRESHOLD) {
+    mouthFrame = 'small';
+  }
+
+  return {
+    rawRms,
+    smoothedRms,
+    amplitude,
+    mouthFrame,
+  };
+}
+
 export function useAudioLipsync() {
   const [mouthFrame, setMouthFrame] = useState<MouthFrame>('closed');
   const [amplitude, setAmplitude] = useState<number>(0);
@@ -124,27 +173,17 @@ export function useAudioLipsync() {
 
         analyser.getByteTimeDomainData(timeDomainData);
 
-        let sumSquares = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          const normalized = (timeDomainData[i] - 128) / 128;
-          sumSquares += normalized * normalized;
-        }
-        const rawRms = Math.sqrt(sumSquares / bufferLength);
-        const smoothed =
-          smoothedRmsRef.current * (1 - SMOOTHING_ALPHA) +
-          rawRms * SMOOTHING_ALPHA;
-        smoothedRmsRef.current = smoothed;
-
-        const normalizedLevel = Math.min(1, smoothed * 10);
+        const {
+          smoothedRms,
+          amplitude: normalizedLevel,
+          mouthFrame: nextFrame,
+        } = computeMouthFrameFromSamples(
+          timeDomainData,
+          smoothedRmsRef.current,
+        );
+        smoothedRmsRef.current = smoothedRms;
         setAmplitude(normalizedLevel);
-
-        if (smoothed < SILENCE_RMS_THRESHOLD) {
-          setMouthFrame('closed');
-        } else if (smoothed < WIDE_OPEN_RMS_THRESHOLD) {
-          setMouthFrame('small');
-        } else {
-          setMouthFrame('open');
-        }
+        setMouthFrame(nextFrame);
 
         rafIdRef.current = requestAnimationFrame(sampleFrame);
       };

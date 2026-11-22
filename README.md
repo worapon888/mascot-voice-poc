@@ -79,42 +79,65 @@ SUPABASE_URL=
 SUPABASE_SECRET_KEY=
 DEMO_ENABLED=true
 OPENAI_TIMEOUT_MS=30000
+SUPABASE_FAQ_AUDIO_BUCKET=mascot-faq-audio
+FAQ_AUDIO_WEBHOOK_SECRET=replace-with-at-least-16-char-random-secret
 ```
 
 ### Security & Cost-Control Rules
 
 - `.env.local` is ignored by Git (`.gitignore`).
-- Never expose `OPENAI_API_KEY` or `SUPABASE_SECRET_KEY` via `NEXT_PUBLIC_` variables.
-- `SUPABASE_SECRET_KEY` must be the server-side Supabase Secret Key (`sb_secret_...` or `service_role` key) so the server-only client can query `public.faqs` with Row Level Security (RLS) enabled and no anonymous policy.
-- `DEMO_ENABLED`: Emergency kill-switch for paid API endpoints (`/api/stt`, `/api/answer`, `/api/tts`). Enabled by default in local development unless set to `false`; disabled by default in `NODE_ENV=production` unless explicitly set to `true`.
+- Never expose `OPENAI_API_KEY`, `SUPABASE_SECRET_KEY`, or `FAQ_AUDIO_WEBHOOK_SECRET` via `NEXT_PUBLIC_` variables.
+- `SUPABASE_SECRET_KEY` must be the server-side Supabase Secret Key (`sb_secret_...` or `service_role` key) so the server-only client can query `public.faqs` and `public.faq_audio_assets` with Row Level Security (RLS) enabled and no anonymous policy.
+- `SUPABASE_FAQ_AUDIO_BUCKET`: Supabase Storage bucket for content-addressed persistent FAQ audio MP3 files (default: `mascot-faq-audio`).
+- `FAQ_AUDIO_WEBHOOK_SECRET`: Shared secret (`>= 16` characters) required in the `x-webhook-secret` or `Authorization: Bearer <secret>` header for `POST /api/faq-audio/webhook` and the Supabase Edge Function `faq-audio-sync`.
+- `DEMO_ENABLED`: Emergency kill-switch for paid API endpoints (`/api/stt`, `/api/answer`, `/api/tts`, `/api/faq-audio/webhook`). Enabled by default in local development unless set to `false`; disabled by default in `NODE_ENV=production` unless explicitly set to `true`.
 - `OPENAI_TIMEOUT_MS`: Upstream timeout for OpenAI requests (default `30000` ms, with `maxRetries: 0` to prevent duplicate paid API charges).
 
 ---
 
 ## 6. Local Development, Code Quality & Smoke-Test Commands
 
-| Command                   | Description                                                             |
-| ------------------------- | ----------------------------------------------------------------------- |
-| `pnpm dev`                | Start the local Next.js development server                              |
-| `pnpm build`              | Build the application for production                                    |
-| `pnpm start`              | Start the production server                                             |
-| `pnpm lint`               | Run ESLint across the project using ESLint CLI                          |
-| `pnpm typecheck`          | Run TypeScript compiler validation (`tsc --noEmit`)                     |
-| `pnpm format`             | Format all project files with Prettier                                  |
-| `pnpm format:check`       | Check formatting across the project without modifying files             |
-| `pnpm check`              | Run `typecheck`, `lint`, and `format:check` sequentially                |
-| `pnpm run smoke:g0`       | Run G0 technical readiness smoke tests (Supabase, TTS, STT, LLM)        |
-| `pnpm run smoke:pipeline` | Run end-to-end Backend Voice Pipeline HTTP integration & negative tests |
-| `pnpm prepare`            | Initialize Husky Git hooks                                              |
+| Command                          | Description                                                                   |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| `pnpm dev`                       | Start the local Next.js development server                                    |
+| `pnpm build`                     | Build the application for production                                          |
+| `pnpm start`                     | Start the production server                                                   |
+| `pnpm lint`                      | Run ESLint across the project using ESLint CLI                                |
+| `pnpm typecheck`                 | Run TypeScript compiler validation (`tsc --noEmit`)                           |
+| `pnpm format`                    | Format all project files with Prettier                                        |
+| `pnpm format:check`              | Check formatting across the project without modifying files                   |
+| `pnpm check`                     | Run `typecheck`, `lint`, and `format:check` sequentially                      |
+| `pnpm run test:normalizer`       | Run Thai clock-time speech normalizer unit & idempotency tests (0 paid calls) |
+| `pnpm run test:optimization`     | Run Fast Path, TTS LRU Cache & Smart Retry verification suite (0 paid calls)  |
+| `pnpm run test:persistent-audio` | Run Persistent FAQ Audio & Webhook Regeneration test suite (0 paid calls)     |
+| `pnpm run faq-audio:dry-run`     | Inspect FAQs and estimate persistent TTS audio generation cost (0 paid calls) |
+| `pnpm run faq-audio:generate`    | Generate & upload missing persistent FAQ MP3 audio files (`--execute`)        |
+| `pnpm run smoke:g0`              | Run G0 technical readiness smoke tests (Supabase, TTS, STT, LLM)              |
+| `pnpm run smoke:pipeline`        | Run end-to-end Backend Voice Pipeline HTTP integration & negative tests       |
+| `pnpm prepare`                   | Initialize Husky Git hooks                                                    |
 
 ---
 
-## 7. API Endpoints & Answer Modes
+## 7. API Endpoints, Persistent FAQ Audio & Automatic Regeneration
 
 - **`GET /api/health`** — Returns `{ "status": "ok", "service": "mascot-voice-poc" }`
 - **`POST /api/stt`** — `multipart/form-data` (`audio`, max 3 MB) → `{ "transcript": "..." }`
-- **`POST /api/answer`** — `application/json` (`{ "transcript": "..." }`) → `{ "answer": "...", "faqIds": [1], "matched": true, "answerMode": "FAQ_GROUNDED" }`
+- **`POST /api/answer`** — `application/json` (`{ "transcript": "..." }`) → `{ "answer": "...", "faqIds": [1], "matched": true, "answerMode": "FAQ_GROUNDED", "audioRef": { ... } }`
 - **`POST /api/tts`** — `application/json` (`{ "text": "..." }`) → Binary `audio/mpeg` (`Cache-Control: no-store`)
+- **`POST /api/faq-audio/webhook`** — Authenticated Supabase Database Webhook endpoint (`x-webhook-secret`) that automatically generates and uploads content-addressed MP3 audio when an active FAQ is inserted or its answer changes.
+
+### Persistent FAQ Audio & Automatic Regeneration Setup
+
+1. **Run SQL Migration in Supabase SQL Editor**:
+   - Execute `supabase/migrations/202611220001_faq_persistent_audio.sql` to create `public.faq_audio_assets` and the `mascot-faq-audio` public-read Storage bucket.
+2. **Pre-generate Audio for Existing FAQs**:
+   - Dry-run (0 paid calls): `pnpm run faq-audio:dry-run`
+   - Execute generation: `pnpm run faq-audio:generate`
+3. **Configure Supabase Database Webhook (or Edge Function `supabase/functions/faq-audio-sync`)**:
+   - Table: `public.faqs`
+   - Events: `INSERT`, `UPDATE`
+   - Target URL: `https://<your-domain>/api/faq-audio/webhook` (or Supabase Edge Function URL `https://<project-ref>.supabase.co/functions/v1/faq-audio-sync`)
+   - HTTP Header: `x-webhook-secret: <FAQ_AUDIO_WEBHOOK_SECRET>`
 
 ### Context-Aware Answer Modes (`POST /api/answer`)
 

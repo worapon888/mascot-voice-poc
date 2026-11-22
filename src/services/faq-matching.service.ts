@@ -143,6 +143,19 @@ export interface ScoredFaqMatch {
   matchedTerms: string[];
 }
 
+export type FastPathMatchReason =
+  'EXACT_QUESTION' | 'APPROVED_INTENT_ALIAS' | 'NONE';
+
+export type FastPathDisqualifier =
+  | 'NO_MATCH'
+  | 'MULTIPLE_MATCHED_FAQS'
+  | 'AMBIGUOUS_SCORE'
+  | 'OUT_OF_SCOPE_SIGNAL'
+  | 'NEGATION_OR_CONDITION_SIGNAL'
+  | 'MULTI_INTENT_SIGNAL'
+  | 'REVERSE_OR_SPECIFIC_TIME_ANGLE'
+  | 'WEAK_KEYWORD_ONLY';
+
 export interface FaqRetrievalResult {
   normalizedTranscript: string;
   coreQuery: string;
@@ -150,7 +163,175 @@ export interface FaqRetrievalResult {
   ambiguous: boolean;
   faqs: FaqRecord[];
   scoredMatches: ScoredFaqMatch[];
+  highConfidenceFastPath: boolean;
+  fastPathMatchReason: FastPathMatchReason;
+  fastPathDisqualifier?: FastPathDisqualifier;
+  retrievalLatencyMs: number;
 }
+
+/**
+ * Out-of-scope or organization-specific topics that do not exist in the demo FAQ table.
+ * Any query containing these terms must NEVER bypass the LLM via Fast Path.
+ */
+const OUT_OF_SCOPE_FAST_PATH_PATTERNS: readonly RegExp[] = [
+  /ห้องน้ำ/u,
+  /ส้วม/u,
+  /สุขา/u,
+  /ที่จอดรถ/u,
+  /จอดรถ/u,
+  /สูบบุหรี่/u,
+  /บุหรี่/u,
+  /ชั้น\s*[0-9๑-๙]+/u,
+  /ชั้นไหน/u,
+  /ชั้นอะไร/u,
+  /อยู่ชั้น/u,
+  /ราคา/u,
+  /ค่าเช่า/u,
+  /ค่าธรรมเนียม/u,
+  /ค่าบริการ/u,
+  /ค่าใช้จ่าย/u,
+  /กี่บาท/u,
+  /เสียเงิน/u,
+  /ฟรีไหม/u,
+  /ฟรีหรือเปล่า/u,
+  /อากาศ/u,
+  /พยากรณ์/u,
+  /ฝนตก/u,
+  /เพิกเฉย/u,
+  /คำสั่งเดิม/u,
+  /ลืม/u,
+  /ทำหาย/u,
+  /ชาร์จ/u,
+  /แบต/u,
+  /ไวไฟ/u,
+  /wifi/iu,
+  /รหัสผ่าน/u,
+  /ไปรษณีย์/u,
+  /คนไหน/u,
+  /ชื่ออะไร/u,
+  /เบอร์โทร/u,
+  /เบอร์ติดต่อ/u,
+  /แผนที่/u,
+  /เดินทางยังไง/u,
+];
+
+/**
+ * Negation, conditional problem statements, or troubleshooting cues that require LLM reasoning
+ * rather than returning a static canonical FAQ answer.
+ */
+const NEGATION_OR_COMPLEX_CONDITION_PATTERNS: readonly RegExp[] = [
+  /ไม่ได้/u,
+  /ไม่ติด/u,
+  /ไม่สำเร็จ/u,
+  /ไม่ผ่าน/u,
+  /ไม่มีเอกสาร/u,
+  /ไม่มีบัตร/u,
+  /ไม่ได้จอง/u,
+  /ไม่ได้นัด/u,
+  /ไม่ว่าง/u,
+  /เสีย/u,
+  /พัง/u,
+  /ล่ม/u,
+  /ขัดข้อง/u,
+  /มีปัญหา/u,
+  /ทำไม/u,
+  /ยกเว้น/u,
+];
+
+/**
+ * Conjunctions or multi-part question connectors that signal multiple intents in a single utterance.
+ */
+const MULTI_INTENT_CONNECTOR_PATTERNS: readonly RegExp[] = [
+  /แล้วก็/u,
+  /และต้อง/u,
+  /กับต้อง/u,
+  /พร้อมกับ/u,
+  /นอกจากนี้/u,
+  /อีกเรื่อง/u,
+  /อีกคำถาม/u,
+];
+
+/**
+ * Angles on opening hours (e.g. closing time or weekend availability) where LLM phrasing
+ * directly answers the specific sub-question better than the raw canonical string.
+ */
+const REVERSE_OR_SPECIFIC_TIME_ANGLE_PATTERNS: readonly RegExp[] = [
+  /(?<!เ)ปิดกี่โมง/u,
+  /(?<!เ)ปิดบริการ/u,
+  /(?<!เ)ปิดทำการ/u,
+  /เวลาปิด/u,
+  /เปิดถึงกี่โมง/u,
+  /เสาร์/u,
+  /อาทิตย์/u,
+  /วันหยุด/u,
+  /พักเที่ยง/u,
+];
+
+/**
+ * Approved high-confidence phrase aliases per canonical FAQ question that are safe
+ * for direct canonical answer return when no disqualifier is present.
+ * Generic single-word keywords (e.g. "มือถือ", "ติดต่อ", "เจ้าหน้าที่", "เอกสาร") are intentionally excluded.
+ */
+const APPROVED_FAST_PATH_PHRASES_BY_QUESTION: Record<
+  string,
+  readonly string[]
+> = {
+  เปิดบริการกี่โมง: [
+    'เปิดบริการกี่โมง',
+    'เปิดกี่โมง',
+    'สำนักงานเปิดกี่โมง',
+    'เปิดทำการกี่โมง',
+    'เวลาทำการ',
+    'วันเวลาทำการ',
+    'เวลาเปิดบริการ',
+    'เวลาเปิดทำการ',
+    'เปิดให้บริการกี่โมง',
+  ],
+  ต้องจองคิวไหม: [
+    'ต้องจองคิวไหม',
+    'ต้องจองคิวล่วงหน้าไหม',
+    'ต้องนัดล่วงหน้า',
+    'ต้องนัดหมายล่วงหน้า',
+    'ต้องจองล่วงหน้า',
+    'ต้องจองไหม',
+    'ต้องนัดไหม',
+    'ต้องนัดคิวไหม',
+    'จองคิวยังไง',
+    'นัดหมายล่วงหน้า',
+  ],
+  เตรียมเอกสารอะไร: [
+    'เตรียมเอกสารอะไร',
+    'เตรียมเอกสารอะไรบ้าง',
+    'ต้องเตรียมเอกสารอะไร',
+    'ต้องเตรียมเอกสารอะไรบ้าง',
+    'ใช้เอกสารอะไร',
+    'ใช้เอกสารอะไรบ้าง',
+    'ต้องใช้เอกสารอะไร',
+    'ต้องเอาอะไรไปบ้าง',
+    'เอาอะไรไปบ้าง',
+    'พกอะไรไปบ้าง',
+    'นำอะไรไปบ้าง',
+  ],
+  ทดลองผ่านมือถือได้ไหม: [
+    'ทดลองผ่านมือถือได้ไหม',
+    'ใช้มือถือได้ไหม',
+    'ใช้ในมือถือได้ไหม',
+    'เปิดในมือถือได้ไหม',
+    'รองรับมือถือไหม',
+    'เข้าผ่านมือถือได้ไหม',
+    'ทดลองในมือถือ',
+    'ใช้งานผ่านมือถือ',
+    'ใช้เบราว์เซอร์อะไร',
+  ],
+  ติดต่อใครเมื่อไม่มีคำตอบ: [
+    'ติดต่อใครเมื่อไม่มีคำตอบ',
+    'ถ้าไม่มีคำตอบติดต่อใคร',
+    'สอบถามเพิ่มเติมได้ที่ไหน',
+    'สอบถามข้อมูลเพิ่มเติมได้ที่ใคร',
+    'ติดต่อผู้ดูแลการสาธิต',
+    'ติดต่อเจ้าหน้าที่ประชาสัมพันธ์',
+  ],
+};
 
 /**
  * Applies Unicode NFC normalization, Thai SARA AM normalization, punctuation removal,
@@ -277,18 +458,156 @@ export function scoreFaqRecord(
 }
 
 /**
- * Retrieves active FAQs from Supabase and selects up to 3 relevant FAQ records
- * using deterministic Thai normalization, exact matching, and keyword/alias scoring.
+ * Evaluates whether a single matched FAQ qualifies for the Safe High-Confidence Fast Path
+ * (returning the canonical FAQ answer directly without invoking the LLM).
+ *
+ * Rules:
+ * 1. Never decides by numeric score threshold alone.
+ * 2. Requires a single unambiguous matched FAQ (`selected.length === 1 && !ambiguous`).
+ * 3. Rejects queries containing out-of-scope signals, negation/troubleshooting conditions,
+ *    multi-intent connectors, or reverse/weekend time angles.
+ * 4. Requires either an exact canonical question match OR an approved intent phrase alias.
  */
-export async function retrieveMatchingFaqs(
+export function evaluateSafeFastPath(
+  normalizedTranscript: string,
+  politeStripped: string,
+  coreQuery: string,
+  allScoredAboveThreshold: ScoredFaqMatch[],
+  selected: ScoredFaqMatch[],
+  ambiguous: boolean,
+): {
+  highConfidenceFastPath: boolean;
+  fastPathMatchReason: FastPathMatchReason;
+  fastPathDisqualifier?: FastPathDisqualifier;
+} {
+  if (selected.length === 0) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'NO_MATCH',
+    };
+  }
+
+  if (ambiguous) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'AMBIGUOUS_SCORE',
+    };
+  }
+
+  if (selected.length > 1 || allScoredAboveThreshold.length > 1) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'MULTIPLE_MATCHED_FAQS',
+    };
+  }
+
+  if (
+    OUT_OF_SCOPE_FAST_PATH_PATTERNS.some((pattern) =>
+      pattern.test(normalizedTranscript),
+    )
+  ) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'OUT_OF_SCOPE_SIGNAL',
+    };
+  }
+
+  if (
+    NEGATION_OR_COMPLEX_CONDITION_PATTERNS.some((pattern) =>
+      pattern.test(normalizedTranscript),
+    )
+  ) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'NEGATION_OR_CONDITION_SIGNAL',
+    };
+  }
+
+  if (
+    MULTI_INTENT_CONNECTOR_PATTERNS.some((pattern) =>
+      pattern.test(normalizedTranscript),
+    )
+  ) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'MULTI_INTENT_SIGNAL',
+    };
+  }
+
+  const primaryMatch = selected[0];
+  const primaryFaq = primaryMatch.faq;
+
+  if (
+    primaryFaq.question === 'เปิดบริการกี่โมง' &&
+    REVERSE_OR_SPECIFIC_TIME_ANGLE_PATTERNS.some((pattern) =>
+      pattern.test(normalizedTranscript),
+    )
+  ) {
+    return {
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'REVERSE_OR_SPECIFIC_TIME_ANGLE',
+    };
+  }
+
+  // Check 1: Exact question match
+  const hasExactMatch = primaryMatch.matchedTerms.some((term) =>
+    term.startsWith('exact:'),
+  );
+  if (hasExactMatch) {
+    return {
+      highConfidenceFastPath: true,
+      fastPathMatchReason: 'EXACT_QUESTION',
+    };
+  }
+
+  // Check 2: Approved intent phrase alias match
+  const approvedPhrases =
+    APPROVED_FAST_PATH_PHRASES_BY_QUESTION[primaryFaq.question] ?? [];
+  const matchesApprovedPhrase = approvedPhrases.some((rawPhrase) => {
+    const normPhrase = stripTrailingPoliteParticles(
+      normalizeThaiText(rawPhrase),
+    );
+    const corePhrase = extractQuestionCore(normPhrase);
+    return (
+      (normPhrase.length >= 4 && politeStripped.includes(normPhrase)) ||
+      (corePhrase.length >= 4 &&
+        (politeStripped.includes(corePhrase) || coreQuery.includes(corePhrase)))
+    );
+  });
+
+  if (matchesApprovedPhrase) {
+    return {
+      highConfidenceFastPath: true,
+      fastPathMatchReason: 'APPROVED_INTENT_ALIAS',
+    };
+  }
+
+  return {
+    highConfidenceFastPath: false,
+    fastPathMatchReason: 'NONE',
+    fastPathDisqualifier: 'WEAK_KEYWORD_ONLY',
+  };
+}
+
+/**
+ * Pure deterministic matcher against a provided list of active FAQs.
+ * Useful for both live DB retrieval and deterministic unit testing.
+ */
+export function matchFaqsAgainstRecords(
   rawTranscript: string,
-): Promise<FaqRetrievalResult> {
+  activeFaqs: FaqRecord[],
+  retrievalLatencyMs = 0,
+): FaqRetrievalResult {
   const normalizedTranscript = normalizeThaiText(rawTranscript);
   const politeStripped = stripTrailingPoliteParticles(normalizedTranscript);
   const coreQuery = extractQuestionCore(politeStripped);
-
-  // Query live active FAQs from Supabase (throws FaqRepositoryError on DB failure)
-  const activeFaqs = await getActiveFaqs();
 
   if (
     !politeStripped ||
@@ -302,6 +621,10 @@ export async function retrieveMatchingFaqs(
       ambiguous: false,
       faqs: [],
       scoredMatches: [],
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'NO_MATCH',
+      retrievalLatencyMs,
     };
   }
 
@@ -318,6 +641,10 @@ export async function retrieveMatchingFaqs(
       ambiguous: false,
       faqs: [],
       scoredMatches: [],
+      highConfidenceFastPath: false,
+      fastPathMatchReason: 'NONE',
+      fastPathDisqualifier: 'NO_MATCH',
+      retrievalLatencyMs,
     };
   }
 
@@ -331,6 +658,15 @@ export async function retrieveMatchingFaqs(
     selected.length > 1 &&
     Math.abs(selected[0].score - selected[1].score) <= 15;
 
+  const fastPathEval = evaluateSafeFastPath(
+    normalizedTranscript,
+    politeStripped,
+    coreQuery,
+    scored,
+    selected,
+    ambiguous,
+  );
+
   return {
     normalizedTranscript,
     coreQuery,
@@ -338,5 +674,24 @@ export async function retrieveMatchingFaqs(
     ambiguous,
     faqs: selected.map((s) => s.faq),
     scoredMatches: selected,
+    highConfidenceFastPath: fastPathEval.highConfidenceFastPath,
+    fastPathMatchReason: fastPathEval.fastPathMatchReason,
+    fastPathDisqualifier: fastPathEval.fastPathDisqualifier,
+    retrievalLatencyMs,
   };
+}
+
+/**
+ * Retrieves active FAQs live from Supabase and selects up to 3 relevant FAQ records
+ * using deterministic Thai normalization, exact matching, and keyword/alias scoring.
+ */
+export async function retrieveMatchingFaqs(
+  rawTranscript: string,
+): Promise<FaqRetrievalResult> {
+  const t0 = performance.now();
+  // Query live active FAQs from Supabase (throws FaqRepositoryError on DB failure)
+  const activeFaqs = await getActiveFaqs();
+  const retrievalLatencyMs = Math.round(performance.now() - t0);
+
+  return matchFaqsAgainstRecords(rawTranscript, activeFaqs, retrievalLatencyMs);
 }

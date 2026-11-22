@@ -3,6 +3,10 @@ import { z } from 'zod';
 import { ApiError } from '@/lib/api/errors';
 import { getOpenAIClient, OPENAI_MODELS } from '@/lib/openai/client';
 import { MAX_TEXT_CHARS } from '@/lib/validations/voice';
+import {
+  type PersistentFaqAudioLookupResult,
+  resolvePersistentFaqAudioRef,
+} from '@/services/faq-audio.service';
 import { retrieveMatchingFaqs } from '@/services/faq-matching.service';
 import type { AnswerMode, AnswerResponse } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
@@ -17,6 +21,36 @@ export const NO_MATCH_FALLBACK_ANSWER =
 const MAX_FAQ_CONTEXT_CHARS = 1_500;
 const MAX_LLM_OUTPUT_TOKENS = 220;
 const THAI_TEXT_REGEX = /[\u0E00-\u0E7F]/;
+const TRAILING_POLITE_PARTICLE_REGEX = /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)$/u;
+
+export interface GroundedAnswerGenerationMetrics {
+  faqRetrievalLatencyMs: number;
+  llmLatencyMs: number;
+  llmCalled: boolean;
+  fastPathBypassedLlm: boolean;
+  persistentAudioStatus: 'HIT' | 'MISS' | 'SKIPPED';
+  persistentAudioLookupLatencyMs: number;
+}
+
+export interface GroundedAnswerWithMetrics {
+  response: AnswerResponse;
+  metrics: GroundedAnswerGenerationMetrics;
+}
+
+/**
+ * Formats a raw canonical database FAQ answer for natural spoken and written Thai
+ * without altering any factual content, numbers, or identifiers.
+ */
+export function formatCanonicalFaqAnswer(rawFaqAnswer: string): string {
+  const trimmed = rawFaqAnswer.normalize('NFC').trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (TRAILING_POLITE_PARTICLE_REGEX.test(trimmed)) {
+    return trimmed.slice(0, MAX_TEXT_CHARS).trim();
+  }
+  return `${trimmed} ครับ`.slice(0, MAX_TEXT_CHARS).trim();
+}
 
 const GROUNDED_FAQ_SYSTEM_INSTRUCTIONS = `คุณเป็นผู้ช่วยมาสคอต AI ภาษาไทยของระบบสาธิตบริการภาครัฐ (Demo)
 กฎเหล็กที่ต้องปฏิบัติตามอย่างเคร่งครัด:
@@ -192,34 +226,86 @@ async function generateGuardedUnmatchedResponse(
 }
 
 /**
- * Generates an answer for a user transcript using:
- * - Step 1 & 2: Supabase FAQ retrieval and deterministic Thai matching (propagating DB outages as 503)
- * - Step 3A: FAQ_GROUNDED mode when trusted FAQ evidence exists
- * - Step 3B: Guarded context-aware LLM mode (GENERAL_GUIDANCE or ORGANIZATION_INFO_UNKNOWN) when no FAQ matches
+ * Generates an answer for a user transcript along with detailed latency/call telemetry:
+ * - Step 1 & 2: Live Supabase FAQ retrieval and deterministic Thai matching (propagating DB outages as 503)
+ * - Step 3A (Fast Path): When a single FAQ matches with high confidence (`highConfidenceFastPath`),
+ *   returns the canonical FAQ answer directly without calling `gpt-4.1-mini` (0 LLM cost, 0 ms LLM latency).
+ * - Step 3B (LLM Grounded Path): When FAQs match with ambiguity or medium confidence, invokes `gpt-4.1-mini`
+ *   with grounded FAQ evidence and factual anchor verification.
+ * - Step 3C (Guarded Unmatched Path): When no FAQ matches, invokes `gpt-4.1-mini` in guarded fallback mode.
  */
-export async function generateGroundedAnswer(
+export async function generateGroundedAnswerWithMetrics(
   rawTranscript: string,
-): Promise<AnswerResponse> {
-  // 1. Retrieve matching FAQs from Supabase (propagates FaqRepositoryError on DB failure -> HTTP 503)
-  const retrieval = await retrieveMatchingFaqs(rawTranscript);
+  customRetriever: typeof retrieveMatchingFaqs = retrieveMatchingFaqs,
+  customPersistentAudioResolver: (
+    faq: FaqRecord,
+  ) => Promise<PersistentFaqAudioLookupResult> = (faq) =>
+    resolvePersistentFaqAudioRef(faq),
+): Promise<GroundedAnswerWithMetrics> {
+  // 1. Retrieve matching FAQs live from Supabase (propagates FaqRepositoryError on DB failure -> HTTP 503)
+  const retrieval = await customRetriever(rawTranscript);
   const sanitizedQuestion = rawTranscript.trim().slice(0, MAX_TEXT_CHARS);
 
   // 2. Unmatched query -> Context-Aware Guarded LLM Fallback (GENERAL_GUIDANCE or ORGANIZATION_INFO_UNKNOWN)
   if (!retrieval.matched || retrieval.faqs.length === 0) {
-    return generateGuardedUnmatchedResponse(sanitizedQuestion);
+    const tLlmStart = performance.now();
+    const unmatchedResponse =
+      await generateGuardedUnmatchedResponse(sanitizedQuestion);
+    const llmLatencyMs = Math.round(performance.now() - tLlmStart);
+    return {
+      response: unmatchedResponse,
+      metrics: {
+        faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
+        llmLatencyMs,
+        llmCalled: true,
+        fastPathBypassedLlm: false,
+        persistentAudioStatus: 'SKIPPED',
+        persistentAudioLookupLatencyMs: 0,
+      },
+    };
   }
 
-  // 3. Matched query -> FAQ_GROUNDED mode
+  // 3A. Safe High-Confidence FAQ Fast Path -> Return canonical FAQ answer directly (skip LLM)
+  if (retrieval.highConfidenceFastPath && retrieval.faqs.length === 1) {
+    const primaryFaq = retrieval.faqs[0];
+    const canonicalAnswer = formatCanonicalFaqAnswer(primaryFaq.answer);
+    if (canonicalAnswer && THAI_TEXT_REGEX.test(canonicalAnswer)) {
+      const audioLookup = await customPersistentAudioResolver(primaryFaq);
+      return {
+        response: {
+          answer: canonicalAnswer,
+          faqIds: [primaryFaq.id],
+          matched: true,
+          answerMode: 'FAQ_GROUNDED',
+          ...(audioLookup.hit && audioLookup.audioRef
+            ? { audioRef: audioLookup.audioRef }
+            : {}),
+        },
+        metrics: {
+          faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
+          llmLatencyMs: 0,
+          llmCalled: false,
+          fastPathBypassedLlm: true,
+          persistentAudioStatus: audioLookup.hit ? 'HIT' : 'MISS',
+          persistentAudioLookupLatencyMs: audioLookup.lookupLatencyMs,
+        },
+      };
+    }
+  }
+
+  // 3B. Matched query requiring LLM disambiguation / context checking -> FAQ_GROUNDED mode
   const boundedContext = buildBoundedFaqContext(retrieval.faqs);
   const userPrompt = `<faq_evidence>\n${boundedContext}\n</faq_evidence>\n\n<user_question>\n${sanitizedQuestion}\n</user_question>`;
 
   const client = getOpenAIClient();
+  const tLlmStart = performance.now();
   const response = await client.responses.create({
     model: OPENAI_MODELS.LLM,
     instructions: GROUNDED_FAQ_SYSTEM_INSTRUCTIONS,
     input: userPrompt,
     max_output_tokens: MAX_LLM_OUTPUT_TOKENS,
   });
+  const llmLatencyMs = Math.round(performance.now() - tLlmStart);
 
   let answerText = (response.output_text ?? '').normalize('NFC').trim();
 
@@ -240,7 +326,7 @@ export async function generateGroundedAnswer(
     );
     if (missingAnchor) {
       // Ground strictly on the verified database FAQ answer if the LLM omitted a required factual anchor
-      answerText = `${primaryFaq.answer} ครับ`;
+      answerText = formatCanonicalFaqAnswer(primaryFaq.answer);
     }
   }
 
@@ -249,9 +335,29 @@ export async function generateGroundedAnswer(
   }
 
   return {
-    answer: answerText,
-    faqIds: retrieval.faqs.map((faq) => faq.id),
-    matched: true,
-    answerMode: 'FAQ_GROUNDED',
+    response: {
+      answer: answerText,
+      faqIds: retrieval.faqs.map((faq) => faq.id),
+      matched: true,
+      answerMode: 'FAQ_GROUNDED',
+    },
+    metrics: {
+      faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
+      llmLatencyMs,
+      llmCalled: true,
+      fastPathBypassedLlm: false,
+      persistentAudioStatus: 'SKIPPED',
+      persistentAudioLookupLatencyMs: 0,
+    },
   };
+}
+
+/**
+ * Generates an answer for a user transcript while preserving the exact AnswerResponse contract.
+ */
+export async function generateGroundedAnswer(
+  rawTranscript: string,
+): Promise<AnswerResponse> {
+  const { response } = await generateGroundedAnswerWithMetrics(rawTranscript);
+  return response;
 }

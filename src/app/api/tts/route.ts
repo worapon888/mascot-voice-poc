@@ -6,7 +6,7 @@ import {
   methodNotAllowedResponse,
 } from '@/lib/api/errors';
 import { validateTtsRequest } from '@/lib/validations/voice';
-import { synthesizeSpeechMp3 } from '@/services/speech.service';
+import { synthesizeSpeechMp3WithMetrics } from '@/services/speech.service';
 import type { ApiErrorResponse } from '@/types/api';
 
 export const runtime = 'nodejs';
@@ -34,7 +34,12 @@ export async function POST(
     }
 
     const { text } = validateTtsRequest(rawBody);
-    const mp3Buffer = await synthesizeSpeechMp3(text);
+    const {
+      buffer: mp3Buffer,
+      cacheStatus,
+      ttsLatencyMs,
+      openAiTtsCalled,
+    } = await synthesizeSpeechMp3WithMetrics(text);
 
     return new NextResponse(new Uint8Array(mp3Buffer), {
       status: 200,
@@ -42,6 +47,9 @@ export async function POST(
         'Content-Type': 'audio/mpeg',
         'Content-Length': String(mp3Buffer.length),
         'Cache-Control': 'no-store',
+        'X-TTS-Cache': cacheStatus,
+        'X-TTS-Latency-Ms': String(ttsLatencyMs),
+        'X-OpenAI-TTS-Called': openAiTtsCalled ? '1' : '0',
       },
     });
   } catch (error) {

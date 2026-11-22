@@ -2,6 +2,7 @@ import 'server-only';
 import { z } from 'zod';
 
 const DEFAULT_OPENAI_TIMEOUT_MS = 30_000;
+export const DEFAULT_FAQ_AUDIO_BUCKET = 'mascot-faq-audio';
 
 const openAIEnvSchema = z.object({
   OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
@@ -57,4 +58,20 @@ export function getOpenAITimeoutMs(): number {
     return DEFAULT_OPENAI_TIMEOUT_MS;
   }
   return parsed;
+}
+
+/**
+ * Returns the configured Supabase Storage bucket name for persistent FAQ audio (default: 'mascot-faq-audio').
+ */
+export function getFaqAudioBucketName(): string {
+  const raw = process.env.SUPABASE_FAQ_AUDIO_BUCKET?.trim();
+  return raw && raw.length > 0 ? raw : DEFAULT_FAQ_AUDIO_BUCKET;
+}
+
+/**
+ * Returns the configured webhook secret used to authenticate Supabase Database Webhook / Edge Function requests.
+ */
+export function getFaqWebhookSecret(): string | null {
+  const raw = process.env.FAQ_AUDIO_WEBHOOK_SECRET?.trim();
+  return raw && raw.length >= 16 ? raw : null;
 }

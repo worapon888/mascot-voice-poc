@@ -45,6 +45,55 @@ export async function getActiveFaqs(
 }
 
 /**
+ * Retrieves a single FAQ record by ID regardless of active status.
+ * Used by persistent audio verification to check current version freshness.
+ */
+export async function getFaqById(id: number): Promise<FaqRecord | null> {
+  const supabase = getSupabaseServerClient();
+
+  const { data, error } = await supabase
+    .from(FAQ_TABLE)
+    .select(FAQ_SELECT_COLUMNS)
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) {
+    throw new FaqRepositoryError(
+      `Failed to retrieve FAQ id=${id} from database.`,
+      error.code || 'SUPABASE_QUERY_ERROR',
+    );
+  }
+
+  return (data as FaqRecord | null) ?? null;
+}
+
+/**
+ * Retrieves all FAQ records (both active and inactive) up to the POC limit.
+ * Used by admin initial audio setup / reconciliation tools.
+ */
+export async function getAllFaqs(
+  limit: number = MAX_POC_FAQ_LIMIT,
+): Promise<FaqRecord[]> {
+  const safeLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_POC_FAQ_LIMIT);
+  const supabase = getSupabaseServerClient();
+
+  const { data, error } = await supabase
+    .from(FAQ_TABLE)
+    .select(FAQ_SELECT_COLUMNS)
+    .order('id', { ascending: true })
+    .limit(safeLimit);
+
+  if (error) {
+    throw new FaqRepositoryError(
+      'Failed to retrieve FAQs from database.',
+      error.code || 'SUPABASE_QUERY_ERROR',
+    );
+  }
+
+  return (data ?? []) as FaqRecord[];
+}
+
+/**
  * Updates the active status of a specific FAQ record by ID.
  * Used for server-side verification and smoke testing.
  */
