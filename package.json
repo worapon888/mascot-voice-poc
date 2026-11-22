@@ -20,6 +20,7 @@
     "test:latency-optimization": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/latency-optimization.test.ts",
     "test:nl-matching": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/faq-matching-nl.test.ts",
     "test:hardcode-free": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/hardcode-free-retrieval.test.ts",
+    "test:playback-lifecycle": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/playback-lifecycle-lipsync.test.ts",
     "faq:backfill-embeddings": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/backfill-faq-embeddings.ts",
     "faq-audio:dry-run": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/generate-faq-audio.ts",
     "faq-audio:generate": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/generate-faq-audio.ts --execute",

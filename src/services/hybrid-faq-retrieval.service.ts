@@ -7,6 +7,7 @@ import {
   extractQuestionCore,
   hasContextualFollowUpSignal,
   normalizeThaiText,
+  scoreFaqRecord,
   stripLeadingConversationalPrefixes,
   stripLocativeDemonstratives,
   stripTrailingPoliteParticles,
@@ -172,11 +173,11 @@ export function evaluateGenericEvidenceSufficiency(
   }
 
   // H. High-Confidence Evidence Match:
-  // Either very high similarity (>= 0.70) or solid similarity (>= 0.17) with a distinctive margin (>= 0.03) or lexical hit (>= 0.25)
+  // Either very high similarity (>= 0.70) or solid similarity (>= 0.17) with a distinctive margin (>= 0.03) or lexical hit (>= 0.20)
   if (
     topSimilarity >= 0.7 ||
     (topSimilarity >= 0.17 && margin >= 0.03) ||
-    (lexicalRank !== null && topSimilarity >= 0.25)
+    (lexicalRank !== null && topSimilarity >= 0.2)
   ) {
     return { sufficiency: 'SUFFICIENT', suggestedTier: 'TIER_1' };
   }
@@ -248,22 +249,36 @@ export async function executeHybridFaqRetrieval(
   // ---------------------------------------------------------------------------
   // Stage B: Compute / Retrieve Query Embedding
   // ---------------------------------------------------------------------------
-  const cacheKey = `${spacelessCore || norm}`;
+  const embedInput = politeStripped || rawTranscript;
+  const cacheKey = embedInput.replace(/\s+/g, '') || spacelessCore || norm;
   let queryVector = getCachedEmbedding(cacheKey);
 
   if (!queryVector) {
     const openai = getOpenAIClient();
     const embedResp = await openai.embeddings.create({
       model: 'text-embedding-3-small',
-      input: coreQuery || rawTranscript,
+      input: embedInput,
     });
     queryVector = embedResp.data[0].embedding;
     setCachedEmbedding(cacheKey, queryVector);
   }
 
   // ---------------------------------------------------------------------------
-  // Stage C: Call Supabase Hybrid RPC (match_faqs_hybrid)
+  // Stage C: Application-Level Thai Lexical Ranking & Supabase Hybrid RPC
   // ---------------------------------------------------------------------------
+  const appLexicalScored = activeFaqs
+    .map((faq) => ({
+      faq,
+      match: scoreFaqRecord(politeStripped, coreQuery, faq),
+    }))
+    .filter((item) => item.match.score >= 35)
+    .sort((a, b) => b.match.score - a.match.score);
+
+  const appLexicalRankMap = new Map<number, number>();
+  appLexicalScored.forEach((item, idx) => {
+    appLexicalRankMap.set(item.faq.id, idx + 1);
+  });
+
   const supabase = getSupabaseServerClient();
   const { data: rpcRows, error: rpcErr } = await supabase.rpc(
     'match_faqs_hybrid',
@@ -299,7 +314,7 @@ export async function executeHybridFaqRetrieval(
   }
 
   // ---------------------------------------------------------------------------
-  // Stage D: Context Bias Boost (Multi-turn follow-up)
+  // Stage D: Reciprocal Rank Fusion & Context Bias Boost
   // ---------------------------------------------------------------------------
   const isFollowUp = hasContextualFollowUpSignal(rawTranscript);
   let contextReferencedFaqId: number | null = null;
@@ -314,12 +329,22 @@ export async function executeHybridFaqRetrieval(
     }
   }
 
+  const RRF_K = 60;
   const adjustedRows = rows.map((row) => {
-    let rrf = row.rrf_score;
+    const lexRank = appLexicalRankMap.get(row.id) ?? row.lexical_rank ?? null;
+    const semRank = row.semantic_rank;
+    let rrf =
+      (lexRank !== null ? 1 / (RRF_K + lexRank) : 0) +
+      (semRank !== null ? 1 / (RRF_K + semRank) : 0);
+
     if (contextReferencedFaqId !== null && row.id === contextReferencedFaqId) {
       rrf += 0.003; // Contextual follow-up boost
     }
-    return { ...row, adjusted_rrf: rrf };
+    return {
+      ...row,
+      lexical_rank: lexRank,
+      adjusted_rrf: rrf,
+    };
   });
 
   adjustedRows.sort((a, b) => b.adjusted_rrf - a.adjusted_rrf);

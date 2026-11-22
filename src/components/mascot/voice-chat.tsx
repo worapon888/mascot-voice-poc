@@ -20,6 +20,7 @@ import {
   requestPersistentAudioBlob,
   requestSpeechToText,
   requestStreamingGroundedAnswer,
+  requestTextToSpeechBlob,
   type RetrySessionSnapshot,
 } from '@/lib/voice/api-client';
 import { evaluateKioskAutoStart } from '@/lib/voice/vad-engine';
@@ -184,12 +185,18 @@ export function VoiceChat() {
           let turnTier: 'TIER_1' | 'TIER_2' | 'TIER_3' = 'TIER_2';
           let turnFaqIds: number[] = [];
           let isTurnMatched = false;
+          let tierPlaybackPromise: Promise<void> | null = null;
 
           await requestStreamingGroundedAnswer(
             sttRes.transcript,
             {
-              onTier: async (tierData) => {
-                if (currentTurnId !== turnIdRef.current) return;
+              onTier: (tierData) => {
+                if (
+                  currentTurnId !== turnIdRef.current ||
+                  controller.signal.aborted
+                ) {
+                  return;
+                }
                 turnTier = tierData.tier;
                 isTurnMatched = tierData.matched;
                 turnFaqIds = tierData.faqIds;
@@ -205,35 +212,77 @@ export function VoiceChat() {
 
                 if (
                   (tierData.tier === 'TIER_1' || tierData.tier === 'TIER_3') &&
-                  tierData.audioUrl
+                  (tierData.audioUrl || tierData.answer)
                 ) {
-                  try {
-                    const audioBlob = await requestPersistentAudioBlob(
-                      tierData.audioUrl,
-                      controller.signal,
-                    );
-                    if (currentTurnId !== turnIdRef.current) return;
-                    if (tierData.answer) {
-                      turnAnswer = tierData.answer;
-                      setAnswer(tierData.answer);
+                  tierPlaybackPromise = (async () => {
+                    try {
+                      let audioBlob: Blob;
+                      if (tierData.audioUrl) {
+                        audioBlob = await requestPersistentAudioBlob(
+                          tierData.audioUrl,
+                          controller.signal,
+                        );
+                      } else {
+                        audioBlob = await requestTextToSpeechBlob(
+                          tierData.answer!,
+                          controller.signal,
+                        );
+                      }
+
+                      if (
+                        currentTurnId !== turnIdRef.current ||
+                        controller.signal.aborted
+                      ) {
+                        return;
+                      }
+
+                      if (tierData.answer) {
+                        turnAnswer = tierData.answer;
+                        setAnswer(tierData.answer);
+                      }
+
+                      setVoiceState('speaking');
+                      if (isHandsFreeActiveRef.current) {
+                        startHandsFreeBargeInFnRef.current();
+                      }
+
+                      const outcome = await playAudioBlob(audioBlob);
+                      if (
+                        currentTurnId !== turnIdRef.current ||
+                        controller.signal.aborted
+                      ) {
+                        return;
+                      }
+
+                      if (outcome === 'autoplay-blocked') {
+                        pendingAudioBlobRef.current = audioBlob;
+                        setAutoplayBlocked(true);
+                      }
+                    } catch (err) {
+                      if (err instanceof Error && err.name === 'AbortError') {
+                        return;
+                      }
                     }
-                    setVoiceState('speaking');
-                    if (isHandsFreeActiveRef.current) {
-                      startHandsFreeBargeInFnRef.current();
-                    }
-                    await playAudioBlob(audioBlob);
-                  } catch {
-                    // Fall back
-                  }
+                  })();
                 }
               },
               onTextDelta: (_delta, accumulated) => {
-                if (currentTurnId !== turnIdRef.current) return;
+                if (
+                  currentTurnId !== turnIdRef.current ||
+                  controller.signal.aborted
+                ) {
+                  return;
+                }
                 turnAnswer = accumulated;
                 setAnswer(accumulated);
               },
               onAudioChunk: (chunkData) => {
-                if (currentTurnId !== turnIdRef.current) return;
+                if (
+                  currentTurnId !== turnIdRef.current ||
+                  controller.signal.aborted
+                ) {
+                  return;
+                }
                 if (!queueHolder.current) {
                   setVoiceState('speaking');
                   if (isHandsFreeActiveRef.current) {
@@ -247,7 +296,12 @@ export function VoiceChat() {
                 );
               },
               onDone: (doneData) => {
-                if (currentTurnId !== turnIdRef.current) return;
+                if (
+                  currentTurnId !== turnIdRef.current ||
+                  controller.signal.aborted
+                ) {
+                  return;
+                }
                 turnAnswer = doneData.fullAnswer;
                 setAnswer(doneData.fullAnswer);
                 if (queueHolder.current) {
@@ -259,10 +313,41 @@ export function VoiceChat() {
             conversationHistoryRef.current,
           );
 
-          if (currentTurnId !== turnIdRef.current) return;
+          if (
+            currentTurnId !== turnIdRef.current ||
+            controller.signal.aborted
+          ) {
+            return;
+          }
 
+          // Network SSE stream has completed without blocking.
+          // Now wait for Audio Playback completion:
           if (queueHolder.current) {
-            await queueHolder.current.promise;
+            const queueOutcome = await queueHolder.current.promise;
+            if (
+              currentTurnId !== turnIdRef.current ||
+              controller.signal.aborted
+            ) {
+              return;
+            }
+            if (queueOutcome === 'autoplay-blocked') {
+              setAutoplayBlocked(true);
+            }
+          } else if (tierPlaybackPromise) {
+            await tierPlaybackPromise;
+            if (
+              currentTurnId !== turnIdRef.current ||
+              controller.signal.aborted
+            ) {
+              return;
+            }
+          }
+
+          if (
+            currentTurnId !== turnIdRef.current ||
+            controller.signal.aborted
+          ) {
+            return;
           }
 
           if (turnAnswer) {

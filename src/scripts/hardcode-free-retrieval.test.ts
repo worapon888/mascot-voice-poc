@@ -64,6 +64,21 @@ async function runHardcodeFreeRetrievalTests() {
   );
   const spokenParaphrases = [
     {
+      query: 'ทำการวันไหนบ้าง',
+      expectedId: 1,
+      desc: 'Operating schedule inquiry',
+    },
+    {
+      query: 'เปิดกี่โมง',
+      expectedId: 1,
+      desc: 'Opening time inquiry',
+    },
+    {
+      query: 'เปิดผ่านมือถือได้ไหม',
+      expectedId: 4,
+      desc: 'Mobile platform compatibility',
+    },
+    {
       query: 'วันเสาร์ที่นี่เปิดหรือเปล่า',
       expectedId: 1,
       desc: 'Weekend schedule with demonstrative "ที่นี่"',

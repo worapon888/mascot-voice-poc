@@ -31,21 +31,21 @@ export function getSupabaseEnv(): SupabaseEnv {
 
 /**
  * Feature flag for FAQ Matching Engine:
- * - 'legacy': uses existing heuristic matching engine (default, safe for regression prevention)
- * - 'hybrid': uses Supabase pgvector + lexical BM25 + RRF hybrid retrieval
+ * - 'hybrid' (default): uses Supabase pgvector + lexical BM25/token + RRF hybrid retrieval
+ * - 'legacy': uses existing heuristic matching engine (generic lexical)
  * - 'shadow': runs legacy as primary responder, runs hybrid asynchronously to log comparison telemetry
  */
 export type FaqMatcherMode = 'legacy' | 'hybrid' | 'shadow';
 
 export function getFaqMatcherMode(): FaqMatcherMode {
   const raw = process.env.FAQ_MATCHER?.trim().toLowerCase();
-  if (raw === 'hybrid') {
-    return 'hybrid';
+  if (raw === 'legacy') {
+    return 'legacy';
   }
   if (raw === 'shadow') {
     return 'shadow';
   }
-  return 'legacy';
+  return 'hybrid';
 }
 
 /**

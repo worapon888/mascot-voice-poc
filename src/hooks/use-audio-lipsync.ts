@@ -81,6 +81,7 @@ export function useAudioLipsync() {
   const playbackResolverRef = useRef<
     ((outcome: PlayAudioOutcome) => void) | null
   >(null);
+  const activeQueueControllerRef = useRef<AudioQueueController | null>(null);
 
   const cancelAnimationLoop = useCallback(() => {
     if (rafIdRef.current !== null) {
@@ -205,6 +206,12 @@ export function useAudioLipsync() {
       cancelAnimationLoop();
       setIsPlaying(false);
 
+      if (activeQueueControllerRef.current) {
+        const queueCtrl = activeQueueControllerRef.current;
+        activeQueueControllerRef.current = null;
+        queueCtrl.abort();
+      }
+
       const audio = audioElementRef.current;
       if (audio) {
         audio.onended = null;
@@ -320,18 +327,10 @@ export function useAudioLipsync() {
     (onFirstPlayStarted?: () => void): AudioQueueController => {
       stopAudio(true);
 
-      const { audio, context, analyser } = ensureAudioGraph();
-      if (context.state === 'suspended') {
-        try {
-          void context.resume();
-        } catch {
-          // Handled on play()
-        }
-      }
-
       const queue: Blob[] = [];
       let isStreamComplete = false;
       let isPlayingCurrent = false;
+      let isTransitioningOrPlaying = false;
       let hasStartedFirst = false;
       let currentChunkUrl: string | null = null;
       let resolvePromise: (outcome: PlayAudioOutcome) => void;
@@ -350,7 +349,11 @@ export function useAudioLipsync() {
         }
       };
 
-      const playNextInQueue = () => {
+      const playNextInQueue = async () => {
+        if (isTransitioningOrPlaying) {
+          return;
+        }
+
         if (queue.length === 0) {
           isPlayingCurrent = false;
           if (isStreamComplete) {
@@ -358,29 +361,45 @@ export function useAudioLipsync() {
             setIsPlaying(false);
             cleanupCurrentChunk();
             playbackResolverRef.current = null;
+            activeQueueControllerRef.current = null;
             resolvePromise('completed');
           }
           return;
         }
 
+        isTransitioningOrPlaying = true;
+        isPlayingCurrent = true;
+
         const nextBlob = queue.shift()!;
         cleanupCurrentChunk();
+
+        const { audio, context, analyser } = ensureAudioGraph();
+        if (context.state === 'suspended') {
+          try {
+            await context.resume();
+          } catch {
+            // Handled on play()
+          }
+        }
 
         currentChunkUrl = URL.createObjectURL(nextBlob);
         currentObjectUrlRef.current = currentChunkUrl;
         audio.src = currentChunkUrl;
         audio.currentTime = 0;
-        isPlayingCurrent = true;
 
         audio.onended = () => {
-          playNextInQueue();
+          isTransitioningOrPlaying = false;
+          void playNextInQueue();
         };
 
         audio.onerror = () => {
           cancelAnimationLoop();
           setIsPlaying(false);
+          isTransitioningOrPlaying = false;
+          isPlayingCurrent = false;
           cleanupCurrentChunk();
           playbackResolverRef.current = null;
+          activeQueueControllerRef.current = null;
           rejectPromise(
             new ClientVoiceError(
               'AUDIO_PLAYBACK_FAILED',
@@ -390,67 +409,95 @@ export function useAudioLipsync() {
           );
         };
 
-        audio
-          .play()
-          .then(() => {
-            setIsPlaying(true);
-            if (!hasStartedFirst) {
-              hasStartedFirst = true;
-              onFirstPlayStarted?.();
-            }
-            startAmplitudeSampling(audio, analyser);
-          })
-          .catch((err: unknown) => {
-            cancelAnimationLoop();
-            setIsPlaying(false);
-            const errName = err instanceof Error ? err.name : '';
-            if (errName === 'NotAllowedError') {
-              playbackResolverRef.current = null;
-              resolvePromise('autoplay-blocked');
-              return;
-            }
-            cleanupCurrentChunk();
+        try {
+          await audio.play();
+          setIsPlaying(true);
+          if (!hasStartedFirst) {
+            hasStartedFirst = true;
+            onFirstPlayStarted?.();
+          }
+          startAmplitudeSampling(audio, analyser);
+        } catch (err: unknown) {
+          cancelAnimationLoop();
+          setIsPlaying(false);
+          isTransitioningOrPlaying = false;
+          isPlayingCurrent = false;
+          activeQueueControllerRef.current = null;
+          const errName = err instanceof Error ? err.name : '';
+          if (errName === 'NotAllowedError') {
             playbackResolverRef.current = null;
-            rejectPromise(
-              new ClientVoiceError(
-                'AUDIO_PLAYBACK_FAILED',
-                500,
-                'ไม่สามารถเริ่มต้นเล่นเสียงตอบกลับได้ กรุณาลองใหม่อีกครั้ง',
-              ),
-            );
-          });
+            resolvePromise('autoplay-blocked');
+            return;
+          }
+          cleanupCurrentChunk();
+          playbackResolverRef.current = null;
+          rejectPromise(
+            new ClientVoiceError(
+              'AUDIO_PLAYBACK_FAILED',
+              500,
+              'ไม่สามารถเริ่มต้นเล่นเสียงตอบกลับได้ กรุณาลองใหม่อีกครั้ง',
+            ),
+          );
+        }
       };
 
-      return {
+      const controller: AudioQueueController = {
         enqueueChunk: (blob: Blob, isLast = false) => {
           queue.push(blob);
           if (isLast) {
             isStreamComplete = true;
           }
-          if (!isPlayingCurrent) {
-            playNextInQueue();
+          if (!isTransitioningOrPlaying) {
+            void playNextInQueue();
           }
         },
         markComplete: () => {
           isStreamComplete = true;
-          if (!isPlayingCurrent && queue.length === 0) {
+          if (
+            !isPlayingCurrent &&
+            !isTransitioningOrPlaying &&
+            queue.length === 0
+          ) {
             cancelAnimationLoop();
             setIsPlaying(false);
             cleanupCurrentChunk();
             playbackResolverRef.current = null;
+            activeQueueControllerRef.current = null;
             resolvePromise('completed');
           }
         },
         abort: () => {
           queue.length = 0;
           isStreamComplete = true;
-          stopAudio(true);
+          isTransitioningOrPlaying = false;
+          isPlayingCurrent = false;
+          activeQueueControllerRef.current = null;
+          cancelAnimationLoop();
+          setIsPlaying(false);
+          const audio = audioElementRef.current;
+          if (audio) {
+            audio.onended = null;
+            audio.onerror = null;
+            try {
+              audio.pause();
+              audio.currentTime = 0;
+              audio.removeAttribute('src');
+              audio.load();
+            } catch {
+              // Ignore pause reset errors
+            }
+          }
           cleanupCurrentChunk();
-          playbackResolverRef.current = null;
+          if (playbackResolverRef.current === resolvePromise) {
+            playbackResolverRef.current = null;
+          }
           resolvePromise('stopped');
         },
         promise,
       };
+
+      activeQueueControllerRef.current = controller;
+      return controller;
     },
     [cancelAnimationLoop, ensureAudioGraph, startAmplitudeSampling, stopAudio],
   );

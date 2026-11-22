@@ -16,20 +16,20 @@ export interface StreamingAnswerCallbacks {
     faqIds: number[];
     answer?: string;
     audioUrl?: string;
-  }) => void;
-  onTextDelta?: (delta: string, accumulated: string) => void;
+  }) => void | Promise<void>;
+  onTextDelta?: (delta: string, accumulated: string) => void | Promise<void>;
   onAudioChunk?: (data: {
     chunkIndex: number;
     text: string;
     blob: Blob;
     cached: boolean;
     isLast: boolean;
-  }) => void;
+  }) => void | Promise<void>;
   onDone?: (data: {
     tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
     fullAnswer: string;
     totalChunks: number;
-  }) => void;
+  }) => void | Promise<void>;
 }
 
 export function base64ToBlob(

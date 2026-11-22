@@ -31,7 +31,10 @@ const GENERIC_STANDALONE_WORDS = new Set([
   'ขอ',
   'ถาม',
   'สอบถาม',
+  'บ้าง',
 ]);
+
+const thaiWordSegmenter = new Intl.Segmenter('th', { granularity: 'word' });
 
 /**
  * Safe trailing Thai polite particles that can be stripped without altering question meaning.
@@ -389,6 +392,8 @@ export function scoreFaqRecord(
     .filter((kw) => kw.length >= 2 && !GENERIC_STANDALONE_WORDS.has(kw))
     .sort((a, b) => b.length - a.length);
 
+  let hasFullKeywordMatch = false;
+
   for (const kw of sortedKeywords) {
     const spacelessKw = kw.replace(/\s+/g, '');
     if (
@@ -406,6 +411,32 @@ export function scoreFaqRecord(
       const kwScore = 30 + kw.length * 4;
       score += kwScore;
       matchedTerms.push(`kw:${kw}`);
+      hasFullKeywordMatch = true;
+    }
+  }
+
+  // De-duplicated token matching for compound keywords when no full keyword matched (e.g. "เวลาทำการ" -> "ทำการ")
+  if (!hasFullKeywordMatch) {
+    const matchedTokens = new Set<string>();
+    for (const kw of sortedKeywords) {
+      const kwTokens = Array.from(thaiWordSegmenter.segment(kw))
+        .filter((s) => s.isWordLike)
+        .map((s) => s.segment)
+        .filter((w) => w.length >= 2 && !GENERIC_STANDALONE_WORDS.has(w));
+      for (const kt of kwTokens) {
+        if (
+          !matchedTokens.has(kt) &&
+          (queryCore.includes(kt) ||
+            politeStrippedQuery.includes(kt) ||
+            conversationalClean.includes(kt))
+        ) {
+          matchedTokens.add(kt);
+          const ktScore = 20 + kt.length * 3;
+          score += ktScore;
+          matchedTerms.push(`kw_token:${kw}[${kt}]`);
+          break;
+        }
+      }
     }
   }
 
