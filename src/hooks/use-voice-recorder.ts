@@ -53,6 +53,8 @@ interface UseVoiceRecorderOptions {
   onAutoStopComplete?: (payload: RecordedAudioPayload) => void;
   /** Called in Hands-Free mode when VAD detects confirmed Speech Start (~200 ms hold). */
   onVadSpeechStart?: () => void;
+  /** Called in Hands-Free mode when VAD confirms Smart Barge-in (~300 ms hold) while mascot is speaking. */
+  onVadBargeIn?: () => void;
   /** Called in Hands-Free mode when a short noise is discarded and VAD returns to listening. */
   onVadSpeechDiscarded?: () => void;
   /** Called in Hands-Free mode when VAD detects Silence End-of-Turn or 20s max utterance cap. */
@@ -63,6 +65,8 @@ interface UseVoiceRecorderOptions {
   onKioskStandbyReset?: () => void;
   /** When true (KIOSK_MODE), keeps the microphone in continuous listening standby across visitor idle periods. */
   kioskMode?: boolean;
+  /** Current normalized mascot speaker output amplitude (0..1) used by Echo-Aware Smart Barge-in. */
+  mascotOutputAmplitude?: number;
   /** Called when a microphone or recorder runtime error occurs. */
   onRecorderError?: (error: ClientVoiceError) => void;
   /** Optional custom VAD thresholds override. */
@@ -95,6 +99,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
   const isCancelledRef = useRef<boolean>(false);
   const isHandsFreeModeRef = useRef<boolean>(false);
   const isVadPausedRef = useRef<boolean>(false);
+  const isMascotSpeakingRef = useRef<boolean>(false);
   const isDiscardRestartRef = useRef<boolean>(false);
   const vadSpeechOriginMsRef = useRef<number>(0);
 
@@ -111,31 +116,37 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
 
   const onAutoStopRef = useRef(options.onAutoStopComplete);
   const onVadSpeechStartRef = useRef(options.onVadSpeechStart);
+  const onVadBargeInRef = useRef(options.onVadBargeIn);
   const onVadSpeechDiscardedRef = useRef(options.onVadSpeechDiscarded);
   const onVadUtteranceCompleteRef = useRef(options.onVadUtteranceComplete);
   const onHandsFreeIdleTimeoutRef = useRef(options.onHandsFreeIdleTimeout);
   const onKioskStandbyResetRef = useRef(options.onKioskStandbyReset);
   const kioskModeRef = useRef(Boolean(options.kioskMode));
+  const mascotOutputAmplitudeRef = useRef(options.mascotOutputAmplitude ?? 0);
   const isStartingHandsFreeRef = useRef(false);
   const onErrorRef = useRef(options.onRecorderError);
 
   useEffect(() => {
     onAutoStopRef.current = options.onAutoStopComplete;
     onVadSpeechStartRef.current = options.onVadSpeechStart;
+    onVadBargeInRef.current = options.onVadBargeIn;
     onVadSpeechDiscardedRef.current = options.onVadSpeechDiscarded;
     onVadUtteranceCompleteRef.current = options.onVadUtteranceComplete;
     onHandsFreeIdleTimeoutRef.current = options.onHandsFreeIdleTimeout;
     onKioskStandbyResetRef.current = options.onKioskStandbyReset;
     kioskModeRef.current = Boolean(options.kioskMode);
+    mascotOutputAmplitudeRef.current = options.mascotOutputAmplitude ?? 0;
     onErrorRef.current = options.onRecorderError;
   }, [
     options.onAutoStopComplete,
     options.onVadSpeechStart,
+    options.onVadBargeIn,
     options.onVadSpeechDiscarded,
     options.onVadUtteranceComplete,
     options.onHandsFreeIdleTimeout,
     options.onKioskStandbyReset,
     options.kioskMode,
+    options.mascotOutputAmplitude,
     options.onRecorderError,
   ]);
 
@@ -196,6 +207,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
     chunksRef.current = [];
     isHandsFreeModeRef.current = false;
     isVadPausedRef.current = false;
+    isMascotSpeakingRef.current = false;
     isDiscardRestartRef.current = false;
     setIsRecording(false);
     setIsHandsFreeSessionActive(false);
@@ -519,6 +531,8 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
             voiceBandRatio,
             isPlaybackOrProcessingPaused: isVadPausedRef.current,
             kioskStandbyMode: kioskModeRef.current,
+            isMascotSpeaking: isMascotSpeakingRef.current,
+            mascotOutputAmplitude: mascotOutputAmplitudeRef.current,
           },
           vadConfigRef.current,
         );
@@ -538,16 +552,26 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
           setIsRecording(true);
           setElapsedSeconds(0);
           onVadSpeechStartRef.current?.();
+        } else if (step.action === 'BARGE_IN_CONFIRMED') {
+          isMascotSpeakingRef.current = false;
+          vadSpeechOriginMsRef.current =
+            step.state.confirmedSpeechStartMs ?? nowMs;
+          setIsRecording(true);
+          setElapsedSeconds(0);
+          onVadBargeInRef.current?.();
         } else if (step.action === 'DISCARD_SHORT_NOISE') {
           setIsRecording(false);
           setElapsedSeconds(0);
-          onVadSpeechDiscardedRef.current?.();
+          if (!isMascotSpeakingRef.current) {
+            onVadSpeechDiscardedRef.current?.();
+          }
         } else if (
           step.action === 'END_OF_SPEECH_COMMIT' ||
           step.action === 'MAX_UTTERANCE_COMMIT'
         ) {
           // Pause VAD immediately so no duplicate STT requests can fire while processing
           isVadPausedRef.current = true;
+          isMascotSpeakingRef.current = false;
           setIsRecording(false);
           setMicAmplitude(0);
 
@@ -566,6 +590,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
           // Auto-sleep session after 30s of user silence (when not in KIOSK_MODE)
           isCancelledRef.current = true;
           isHandsFreeModeRef.current = false;
+          isMascotSpeakingRef.current = false;
           const recorder = mediaRecorderRef.current;
           if (recorder && recorder.state !== 'inactive') {
             try {
@@ -606,6 +631,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
       isCancelledRef.current = false;
       isHandsFreeModeRef.current = true;
       isVadPausedRef.current = false;
+      isMascotSpeakingRef.current = false;
 
       const stream = await requestMicrophoneStream();
       setIsHandsFreeSessionActive(true);
@@ -616,6 +642,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
       startVadSamplingLoop(stream);
     } catch (err) {
       isHandsFreeModeRef.current = false;
+      isMascotSpeakingRef.current = false;
       setIsHandsFreeSessionActive(false);
       throw err;
     } finally {
@@ -629,8 +656,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
   ]);
 
   /**
-   * Pauses VAD listening during STT, LLM, TTS, and Mascot Audio Playback
-   * so mascot speaker output is NEVER captured as a new user utterance (Phase 1 Self-Listening Prevention).
+   * Pauses VAD listening during STT, LLM, and TTS generation.
    */
   const pauseHandsFreeListening = useCallback(() => {
     if (!isHandsFreeModeRef.current) {
@@ -641,6 +667,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
       postPlaybackCooldownTimeoutRef.current = null;
     }
     isVadPausedRef.current = true;
+    isMascotSpeakingRef.current = false;
     setIsRecording(false);
     setElapsedSeconds(0);
     setMicAmplitude(0);
@@ -657,7 +684,33 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
   }, []);
 
   /**
-   * Resumes Hands-Free listening after mascot audio playback finishes and
+   * Enables Echo-Aware Smart Barge-in monitoring and starts a rolling pre-roll
+   * MediaRecorder segment while the mascot is actively speaking (`voiceState === 'speaking'`).
+   * If the user speaks over the mascot for `bargeInHoldMs` (~300 ms), `onVadBargeIn` fires
+   * and the pre-roll chunks ensure the user's first syllable is preserved.
+   */
+  const startHandsFreeBargeInMonitoring = useCallback(() => {
+    if (!isHandsFreeModeRef.current || !mediaStreamRef.current) {
+      return;
+    }
+    if (postPlaybackCooldownTimeoutRef.current) {
+      clearTimeout(postPlaybackCooldownTimeoutRef.current);
+      postPlaybackCooldownTimeoutRef.current = null;
+    }
+    vadStateRef.current = resetVadStateForNextTurn(
+      vadStateRef.current,
+      performance.now(),
+      vadConfigRef.current,
+    );
+    isMascotSpeakingRef.current = true;
+    isVadPausedRef.current = false;
+    setIsRecording(false);
+    setElapsedSeconds(0);
+    startHandsFreeRecorderSegment();
+  }, [startHandsFreeRecorderSegment]);
+
+  /**
+   * Resumes normal Hands-Free listening after mascot audio playback finishes and
    * waits for the post-playback acoustic tail (`postPlaybackCooldownMs`, default 350 ms) to settle.
    */
   const resumeHandsFreeListening = useCallback(
@@ -671,6 +724,25 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
         postPlaybackCooldownTimeoutRef.current = null;
       }
 
+      isMascotSpeakingRef.current = false;
+
+      // If a rolling Barge-in recorder segment was running during mascot speech and no barge-in
+      // occurred, discard its chunks so speaker audio never leaks into the next listening turn.
+      const activeRecorder = mediaRecorderRef.current;
+      if (
+        activeRecorder &&
+        activeRecorder.state !== 'inactive' &&
+        vadStateRef.current.phase !== 'SPEAKING'
+      ) {
+        isVadPausedRef.current = true;
+        isDiscardRestartRef.current = true;
+        try {
+          activeRecorder.stop();
+        } catch {
+          // Ignore
+        }
+      }
+
       const activateListening = () => {
         if (!isHandsFreeModeRef.current || !mediaStreamRef.current) {
           return;
@@ -680,6 +752,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
           performance.now(),
           vadConfigRef.current,
         );
+        isMascotSpeakingRef.current = false;
         isVadPausedRef.current = false;
         setIsRecording(false);
         setElapsedSeconds(0);
@@ -909,6 +982,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
     micAmplitude,
     startHandsFreeSession,
     pauseHandsFreeListening,
+    startHandsFreeBargeInMonitoring,
     resumeHandsFreeListening,
     stopHandsFreeSession,
     startRecording,

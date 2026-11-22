@@ -1,11 +1,52 @@
 import type {
   AnswerResponse,
   ApiErrorResponse,
+  ConversationTurn,
   SttResponse,
 } from '@/types/api';
 
 export const MAX_BROWSER_AUDIO_BYTES = 3 * 1024 * 1024; // 3 MB
 export const MAX_RECORDING_SECONDS = 20;
+export const MAX_CLIENT_CONVERSATION_HISTORY_TURNS = 4;
+
+/**
+ * Pure helper that appends a completed user + assistant exchange to the client session's
+ * sliding conversation window (capped at `maxTurns`, default 4 turns).
+ * Aborted or incomplete turns must never be passed to this helper.
+ */
+export function appendCompletedTurnToHistory(
+  currentHistory: ReadonlyArray<ConversationTurn>,
+  userTranscript: string,
+  answerResult: AnswerResponse,
+  maxTurns = MAX_CLIENT_CONVERSATION_HISTORY_TURNS,
+): ConversationTurn[] {
+  const cleanUser = userTranscript.trim().slice(0, 500);
+  const cleanAssistant = answerResult.answer.trim().slice(0, 500);
+  if (!cleanUser || !cleanAssistant) {
+    return [...currentHistory].slice(-maxTurns);
+  }
+
+  const faqIds =
+    answerResult.faqIds && answerResult.faqIds.length > 0
+      ? answerResult.faqIds.slice(0, 5)
+      : undefined;
+
+  const nextTurns: ConversationTurn[] = [
+    ...currentHistory,
+    {
+      role: 'user',
+      text: cleanUser,
+      ...(faqIds ? { faqIds } : {}),
+    },
+    {
+      role: 'assistant',
+      text: cleanAssistant,
+      ...(faqIds ? { faqIds } : {}),
+    },
+  ];
+
+  return nextTurns.slice(-maxTurns);
+}
 
 export class ClientVoiceError extends Error {
   public readonly code: string;
@@ -175,12 +216,24 @@ export async function requestSpeechToText(
 }
 
 /**
- * Step B: Sends Thai transcript to POST /api/answer to retrieve a Supabase FAQ-grounded answer.
+ * Step B: Sends Thai transcript (and optional recent conversation history) to POST /api/answer
+ * to retrieve a Supabase FAQ-grounded answer.
  */
 export async function requestGroundedAnswer(
   transcript: string,
   signal?: AbortSignal,
+  conversationHistory?: ReadonlyArray<ConversationTurn>,
 ): Promise<AnswerResponse> {
+  const payload =
+    conversationHistory && conversationHistory.length > 0
+      ? {
+          transcript,
+          conversationHistory: conversationHistory.slice(
+            -MAX_CLIENT_CONVERSATION_HISTORY_TURNS,
+          ),
+        }
+      : { transcript };
+
   let response: Response;
   try {
     response = await fetch('/api/answer', {
@@ -188,7 +241,7 @@ export async function requestGroundedAnswer(
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ transcript }),
+      body: JSON.stringify(payload),
       signal,
     });
   } catch (err) {
@@ -313,6 +366,7 @@ export interface SmartPipelineExecutionOptions {
   recordingPayload: RetrySessionSnapshot['recording'];
   existingSession?: RetrySessionSnapshot | null;
   isRetry?: boolean;
+  conversationHistory?: ReadonlyArray<ConversationTurn>;
   isStaleTurn: () => boolean;
   signal: AbortSignal;
   onStateChange: (state: 'transcribing' | 'thinking' | 'synthesizing') => void;
@@ -354,6 +408,7 @@ export async function executeSmartPipelineStages(
     recordingPayload,
     existingSession,
     isRetry = false,
+    conversationHistory,
     isStaleTurn,
     signal,
     onStateChange,
@@ -425,7 +480,11 @@ export async function executeSmartPipelineStages(
   if (!activeAnswerResult) {
     onStateChange('thinking');
     const tAns0 = performance.now();
-    const fetchedAnswer = await answerFn(activeTranscript, signal);
+    const fetchedAnswer = await answerFn(
+      activeTranscript,
+      signal,
+      conversationHistory,
+    );
     stageLatenciesMs.answerMs = Math.round(performance.now() - tAns0);
     apiCallsMade.answer += 1;
 

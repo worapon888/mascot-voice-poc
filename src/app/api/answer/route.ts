@@ -34,9 +34,13 @@ export async function POST(
       throw new ApiError('INVALID_REQUEST', 400, 'รูปแบบ JSON ไม่ถูกต้อง');
     }
 
-    const { transcript } = validateAnswerRequest(rawBody);
-    const { response, metrics } =
-      await generateGroundedAnswerWithMetrics(transcript);
+    const { transcript, conversationHistory } = validateAnswerRequest(rawBody);
+    const { response, metrics } = await generateGroundedAnswerWithMetrics(
+      transcript,
+      undefined,
+      undefined,
+      conversationHistory,
+    );
 
     return NextResponse.json(response, {
       status: 200,

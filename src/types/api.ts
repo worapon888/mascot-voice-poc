@@ -10,6 +10,14 @@ export interface SttResponse {
 export type AnswerMode =
   'FAQ_GROUNDED' | 'GENERAL_GUIDANCE' | 'ORGANIZATION_INFO_UNKNOWN';
 
+export type ConversationTurnRole = 'user' | 'assistant';
+
+export interface ConversationTurn {
+  role: ConversationTurnRole;
+  text: string;
+  faqIds?: number[];
+}
+
 export interface AnswerAudioRef {
   faqId: number;
   contentHash: string;

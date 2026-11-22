@@ -1,5 +1,6 @@
 import 'server-only';
 import { getActiveFaqs } from '@/repositories/faq.repository';
+import type { ConversationTurn } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
 
 export const MAX_MATCHED_FAQS = 3;
@@ -154,6 +155,7 @@ export type FastPathDisqualifier =
   | 'NEGATION_OR_CONDITION_SIGNAL'
   | 'MULTI_INTENT_SIGNAL'
   | 'REVERSE_OR_SPECIFIC_TIME_ANGLE'
+  | 'CONTEXTUAL_FOLLOW_UP'
   | 'WEAK_KEYWORD_ONLY';
 
 export interface FaqRetrievalResult {
@@ -682,16 +684,191 @@ export function matchFaqsAgainstRecords(
 }
 
 /**
+ * Ellipsis, anaphora, or follow-up question patterns that depend on the preceding conversation turn
+ * (e.g., "แล้ววันเสาร์ล่ะ", "ถ้าไม่มีล่ะ", "เรื่องนี้ติดต่อใคร", "ใช้อะไรแทนได้ไหม").
+ */
+const CONTEXTUAL_FOLLOW_UP_PATTERNS: readonly RegExp[] = [
+  /^(แล้ว|งั้น|อ้าว|เอ่อ)\s*(ถ้า|วัน|ช่วง|ตอน|อัน|เรื่อง|กรณี|แบบ|เวลา)/u,
+  /อันนั้น/u,
+  /อันนี้/u,
+  /เรื่องนี้/u,
+  /เรื่องนั้น/u,
+  /กรณีนี้/u,
+  /แบบนี้/u,
+  /แบบนั้น/u,
+  /ถ้าไม่มี/u,
+  /ถ้าไม่ครบ/u,
+  /ถ้าไม่ได้/u,
+  /ใช้อะไรแทน/u,
+  /แทนได้ไหม/u,
+  /ทำยังไงต่อ/u,
+  /ขอรายละเอียดเพิ่ม/u,
+  /ขยายความ/u,
+  /ล่ะ$/u,
+];
+
+/**
+ * Returns true when the normalized/polite-stripped transcript contains an ellipsis or
+ * follow-up cue that refers back to the previous conversation turn.
+ */
+export function hasContextualFollowUpSignal(rawTranscript: string): boolean {
+  const normalized = normalizeThaiText(rawTranscript);
+  const politeStripped = stripTrailingPoliteParticles(normalized);
+  if (!politeStripped) {
+    return false;
+  }
+  return CONTEXTUAL_FOLLOW_UP_PATTERNS.some(
+    (pattern) => pattern.test(normalized) || pattern.test(politeStripped),
+  );
+}
+
+/**
+ * Resolves FAQ matches with optional multi-turn conversation history (`conversationHistory`).
+ *
+ * Guarantees:
+ * 1. Self-contained queries that match a FAQ with high confidence (`highConfidenceFastPath === true`)
+ *    and have no ellipsis/anaphora dependency keep `highConfidenceFastPath: true` so the Safe FAQ Fast Path
+ *    and Persistent FAQ Audio (`0 LLM call, 0 TTS call`) are 100% preserved.
+ * 2. Contextual follow-up queries (e.g. "เปิดกี่โมง" -> "แล้ววันเสาร์ล่ะ" or "เตรียมเอกสารอะไร" -> "ถ้าไม่มีล่ะ")
+ *    inherit the referenced FAQ(s) from recent conversation history as Grounded Candidate Evidence
+ *    and route to the Grounded LLM (`highConfidenceFastPath: false`, `fastPathDisqualifier: 'CONTEXTUAL_FOLLOW_UP'`).
+ * 3. Out-of-scope queries (e.g. "ห้องน้ำอยู่ชั้นไหน", "ที่จอดรถอยู่ตรงไหน") are never falsely forced onto prior FAQs.
+ */
+export function matchFaqsWithConversationContext(
+  rawTranscript: string,
+  activeFaqs: FaqRecord[],
+  conversationHistory: ReadonlyArray<ConversationTurn> = [],
+  retrievalLatencyMs = 0,
+): FaqRetrievalResult {
+  const primary = matchFaqsAgainstRecords(
+    rawTranscript,
+    activeFaqs,
+    retrievalLatencyMs,
+  );
+
+  if (!conversationHistory || conversationHistory.length === 0) {
+    return primary;
+  }
+
+  const normalized = primary.normalizedTranscript;
+  const isOutOfScope = OUT_OF_SCOPE_FAST_PATH_PATTERNS.some((pattern) =>
+    pattern.test(normalized),
+  );
+  if (isOutOfScope) {
+    return primary;
+  }
+
+  const isFollowUp = hasContextualFollowUpSignal(rawTranscript);
+
+  // Preserve Self-Contained High-Confidence Fast Path (0 LLM cost)
+  if (primary.highConfidenceFastPath && !isFollowUp) {
+    return primary;
+  }
+
+  if (!isFollowUp) {
+    return primary;
+  }
+
+  // Extract recent referenced FAQ IDs from conversationHistory (most recent turn first)
+  const referencedFaqIds: number[] = [];
+  const seenIds = new Set<number>();
+
+  for (let i = conversationHistory.length - 1; i >= 0; i--) {
+    const turn = conversationHistory[i];
+    if (turn.faqIds && turn.faqIds.length > 0) {
+      for (const id of turn.faqIds) {
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          referencedFaqIds.push(id);
+        }
+      }
+    } else if (turn.text) {
+      const turnMatch = matchFaqsAgainstRecords(turn.text, activeFaqs, 0);
+      for (const faq of turnMatch.faqs) {
+        if (!seenIds.has(faq.id)) {
+          seenIds.add(faq.id);
+          referencedFaqIds.push(faq.id);
+        }
+      }
+    }
+  }
+
+  if (referencedFaqIds.length === 0) {
+    return primary;
+  }
+
+  const faqById = new Map<number, FaqRecord>(
+    activeFaqs.map((faq) => [faq.id, faq]),
+  );
+
+  const combinedFaqs: FaqRecord[] = [];
+  const combinedScores: ScoredFaqMatch[] = [];
+  const includedIds = new Set<number>();
+
+  for (const scoredItem of primary.scoredMatches) {
+    if (
+      !includedIds.has(scoredItem.faq.id) &&
+      combinedFaqs.length < MAX_MATCHED_FAQS
+    ) {
+      includedIds.add(scoredItem.faq.id);
+      combinedFaqs.push(scoredItem.faq);
+      combinedScores.push(scoredItem);
+    }
+  }
+
+  for (const refId of referencedFaqIds) {
+    const faq = faqById.get(refId);
+    if (
+      faq &&
+      !includedIds.has(faq.id) &&
+      combinedFaqs.length < MAX_MATCHED_FAQS
+    ) {
+      includedIds.add(faq.id);
+      combinedFaqs.push(faq);
+      combinedScores.push({
+        faq,
+        score: MIN_MATCH_SCORE,
+        matchedTerms: [`context:faq#${faq.id}`],
+      });
+    }
+  }
+
+  if (combinedFaqs.length === 0) {
+    return primary;
+  }
+
+  return {
+    normalizedTranscript: primary.normalizedTranscript,
+    coreQuery: primary.coreQuery,
+    matched: true,
+    ambiguous: primary.ambiguous || combinedFaqs.length > 1,
+    faqs: combinedFaqs,
+    scoredMatches: combinedScores,
+    highConfidenceFastPath: false,
+    fastPathMatchReason: 'NONE',
+    fastPathDisqualifier: 'CONTEXTUAL_FOLLOW_UP',
+    retrievalLatencyMs,
+  };
+}
+
+/**
  * Retrieves active FAQs live from Supabase and selects up to 3 relevant FAQ records
- * using deterministic Thai normalization, exact matching, and keyword/alias scoring.
+ * using deterministic Thai normalization, exact matching, keyword/alias scoring,
+ * and optional multi-turn conversation context.
  */
 export async function retrieveMatchingFaqs(
   rawTranscript: string,
+  conversationHistory: ReadonlyArray<ConversationTurn> = [],
 ): Promise<FaqRetrievalResult> {
   const t0 = performance.now();
   // Query live active FAQs from Supabase (throws FaqRepositoryError on DB failure)
   const activeFaqs = await getActiveFaqs();
   const retrievalLatencyMs = Math.round(performance.now() - t0);
 
-  return matchFaqsAgainstRecords(rawTranscript, activeFaqs, retrievalLatencyMs);
+  return matchFaqsWithConversationContext(
+    rawTranscript,
+    activeFaqs,
+    conversationHistory,
+    retrievalLatencyMs,
+  );
 }

@@ -10,12 +10,13 @@ import {
   useVoiceRecorder,
 } from '@/hooks/use-voice-recorder';
 import {
+  appendCompletedTurnToHistory,
   ClientVoiceError,
   executeSmartPipelineStages,
   type RetrySessionSnapshot,
 } from '@/lib/voice/api-client';
 import { evaluateKioskAutoStart } from '@/lib/voice/vad-engine';
-import type { AnswerMode } from '@/types/api';
+import type { AnswerMode, ConversationTurn } from '@/types/api';
 import type { VoiceInteractionMode, VoiceState } from '@/types/voice';
 
 function resolveInitialKioskModeEnabled(): boolean {
@@ -58,10 +59,12 @@ export function VoiceChat() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const lastRecordingRef = useRef<RecordedAudioPayload | null>(null);
   const retrySessionRef = useRef<RetrySessionSnapshot | null>(null);
+  const conversationHistoryRef = useRef<ConversationTurn[]>([]);
   const pendingAudioBlobRef = useRef<Blob | null>(null);
   const isHandsFreeActiveRef = useRef<boolean>(false);
   const kioskBootstrappedRef = useRef<boolean>(false);
   const pauseHandsFreeFnRef = useRef<() => void>(() => {});
+  const startHandsFreeBargeInFnRef = useRef<() => void>(() => {});
   const resumeHandsFreeFnRef = useRef<(cooldown?: boolean) => void>(() => {});
   const stopHandsFreeFnRef = useRef<() => void>(() => {});
 
@@ -118,6 +121,7 @@ export function VoiceChat() {
           recordingPayload,
           existingSession: retrySessionRef.current,
           isRetry,
+          conversationHistory: conversationHistoryRef.current,
           isStaleTurn: () => currentTurnId !== turnIdRef.current,
           signal: controller.signal,
           onStateChange: (nextState) => {
@@ -152,8 +156,22 @@ export function VoiceChat() {
         retrySessionRef.current = stageResult.session;
         const ttsBlob = stageResult.ttsBlob;
 
-        // Step D: Audio Playback + Real Web Audio API Lip-Sync
+        if (
+          stageResult.session.transcript &&
+          stageResult.session.answerResult
+        ) {
+          conversationHistoryRef.current = appendCompletedTurnToHistory(
+            conversationHistoryRef.current,
+            stageResult.session.transcript,
+            stageResult.session.answerResult,
+          );
+        }
+
+        // Step D: Audio Playback + Real Web Audio API Lip-Sync + Smart Barge-in Monitoring
         setVoiceState('speaking');
+        if (isHandsFreeActiveRef.current) {
+          startHandsFreeBargeInFnRef.current();
+        }
         const outcome = await playAudioBlob(ttsBlob);
         if (currentTurnId !== turnIdRef.current) {
           return;
@@ -252,6 +270,7 @@ export function VoiceChat() {
     micAmplitude,
     startHandsFreeSession,
     pauseHandsFreeListening,
+    startHandsFreeBargeInMonitoring,
     resumeHandsFreeListening,
     stopHandsFreeSession,
     startRecording,
@@ -263,6 +282,19 @@ export function VoiceChat() {
     },
     onVadSpeechStart: () => {
       if (isHandsFreeActiveRef.current) {
+        setErrorMessage(null);
+        setVoiceState('recording');
+      }
+    },
+    onVadBargeIn: () => {
+      if (isHandsFreeActiveRef.current) {
+        // Invalidate the currently speaking turn, abort any pending request,
+        // immediately stop mascot audio playback & lip-sync, and switch to recording the new utterance.
+        turnIdRef.current += 1;
+        abortActiveRequest();
+        stopAudio(true);
+        pendingAudioBlobRef.current = null;
+        setAutoplayBlocked(false);
         setErrorMessage(null);
         setVoiceState('recording');
       }
@@ -282,11 +314,13 @@ export function VoiceChat() {
       abortActiveRequest();
       stopAudio(true);
       isHandsFreeActiveRef.current = false;
+      conversationHistoryRef.current = [];
       setVoiceState('idle');
     },
     onKioskStandbyReset: () => {
       // In KIOSK_MODE, when 30s elapses with no visitor, clear previous visitor's Q&A display
-      // and stay in 'listening' standby so the next visitor can walk up and speak immediately.
+      // and conversation context, and stay in 'listening' standby so the next visitor starts fresh.
+      conversationHistoryRef.current = [];
       setTranscript('');
       setAnswer('');
       setMatchedFaqIds([]);
@@ -298,14 +332,21 @@ export function VoiceChat() {
       setVoiceState('listening');
     },
     kioskMode: kioskModeEnabled && interactionMode === 'hands-free',
+    mascotOutputAmplitude: voiceState === 'speaking' ? amplitude : 0,
     onRecorderError: handleRecorderError,
   });
 
   useEffect(() => {
     pauseHandsFreeFnRef.current = pauseHandsFreeListening;
+    startHandsFreeBargeInFnRef.current = startHandsFreeBargeInMonitoring;
     resumeHandsFreeFnRef.current = resumeHandsFreeListening;
     stopHandsFreeFnRef.current = stopHandsFreeSession;
-  }, [pauseHandsFreeListening, resumeHandsFreeListening, stopHandsFreeSession]);
+  }, [
+    pauseHandsFreeListening,
+    resumeHandsFreeListening,
+    startHandsFreeBargeInMonitoring,
+    stopHandsFreeSession,
+  ]);
 
   /**
    * Zero-Touch Kiosk Bootstrap:
@@ -462,6 +503,7 @@ export function VoiceChat() {
   const handleEndHandsFreeSession = useCallback(() => {
     turnIdRef.current += 1;
     isHandsFreeActiveRef.current = false;
+    conversationHistoryRef.current = [];
     abortActiveRequest();
     stopHandsFreeSession();
     stopAudio(true);
@@ -590,6 +632,9 @@ export function VoiceChat() {
     try {
       await unlockAudioContext();
       setVoiceState('speaking');
+      if (isHandsFreeActiveRef.current) {
+        startHandsFreeBargeInMonitoring();
+      }
       const outcome = await playAudioBlob(blob);
       if (currentTurnId !== turnIdRef.current) {
         return;
@@ -622,6 +667,7 @@ export function VoiceChat() {
     pauseHandsFreeListening,
     playAudioBlob,
     resumeHandsFreeListening,
+    startHandsFreeBargeInMonitoring,
     stopHandsFreeSession,
     unlockAudioContext,
   ]);

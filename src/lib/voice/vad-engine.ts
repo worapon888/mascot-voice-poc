@@ -29,6 +29,18 @@ export interface VadThresholdConfig {
   initialNoiseFloorRms: number;
   /** Maximum capped noise floor RMS so loud transient noise does not permanently deafen VAD (default: 0.045). */
   maxNoiseFloorRms: number;
+  /** Minimum baseline RMS required to consider audio as a Barge-in candidate while mascot is speaking (default: 0.036). */
+  bargeInMinRms: number;
+  /** Multiplier above adaptive noise floor required during mascot speech for Barge-in (default: 3.4). */
+  bargeInNoiseFloorMultiplier: number;
+  /** Additional RMS margin scaled by `mascotOutputAmplitude` (0..1) to reject speaker acoustic bleed (default: 0.18). */
+  bargeInOutputEchoMultiplier: number;
+  /** Stricter minimum human voice-band energy ratio (85 Hz - 3400 Hz) required for Barge-in (default: 0.38). */
+  bargeInMinVoiceBandRatio: number;
+  /** Continuous speech hold duration (ms) required during mascot playback before confirming Barge-in (default: 300 ms). */
+  bargeInHoldMs: number;
+  /** Maximum mascot output amplitude (0..1) above which Barge-in is suppressed to prevent clipped speaker self-interruption (default: 0.92). */
+  maxSafeBargeInOutputAmplitude: number;
 }
 
 export const DEFAULT_VAD_CONFIG: VadThresholdConfig = {
@@ -47,17 +59,25 @@ export const DEFAULT_VAD_CONFIG: VadThresholdConfig = {
   noiseFloorAlpha: 0.06,
   initialNoiseFloorRms: 0.008,
   maxNoiseFloorRms: 0.045,
+  bargeInMinRms: 0.036,
+  bargeInNoiseFloorMultiplier: 3.4,
+  bargeInOutputEchoMultiplier: 0.18,
+  bargeInMinVoiceBandRatio: 0.38,
+  bargeInHoldMs: 300,
+  maxSafeBargeInOutputAmplitude: 0.92,
 };
 
 export interface VadFrameInput {
   nowMs: number;
   rms: number;
   voiceBandRatio?: number;
-  /** True when mascot is transcribing, thinking, synthesizing, speaking, or in post-playback tail cooldown. */
+  /** True when mascot is transcribing, thinking, synthesizing, or in post-playback tail cooldown (or when Barge-in is disabled during speaking). */
   isPlaybackOrProcessingPaused: boolean;
   /** When true (KIOSK_MODE), the microphone remains continuously in LISTENING standby for the next visitor instead of auto-terminating after idleTimeoutMs. */
   kioskStandbyMode?: boolean;
-  /** Reserved for Phase 2 Barge-in output reference amplitude. */
+  /** True when mascot is actively speaking (`voiceState === 'speaking'`) and Smart Barge-in monitoring is active. */
+  isMascotSpeaking?: boolean;
+  /** Current normalized mascot speaker output amplitude (0..1) from Web Audio lip-sync analyser. */
   mascotOutputAmplitude?: number;
 }
 
@@ -66,6 +86,7 @@ export type VadDetectorPhase = 'LISTENING' | 'SPEECH_STARTING' | 'SPEAKING';
 export type VadTransitionAction =
   | 'NONE'
   | 'SPEECH_START_CONFIRMED'
+  | 'BARGE_IN_CONFIRMED'
   | 'END_OF_SPEECH_COMMIT'
   | 'DISCARD_SHORT_NOISE'
   | 'MAX_UTTERANCE_COMMIT'
@@ -203,13 +224,35 @@ export function resetVadStateForNextTurn(
 }
 
 /**
- * Pure, deterministic step function for Local Browser Voice Activity Detection (Phase 1).
+ * Computes the dynamic microphone RMS threshold required to trigger Smart Barge-in
+ * while the mascot is actively speaking. Scales upward with both the ambient noise floor
+ * and the current mascot speaker output amplitude (`mascotOutputAmplitude`).
+ */
+export function computeDynamicBargeInThreshold(
+  noiseFloorRms: number,
+  mascotOutputAmplitude = 0,
+  config: VadThresholdConfig = DEFAULT_VAD_CONFIG,
+): number {
+  const safeOutputAmp = Math.max(0, Math.min(1, mascotOutputAmplitude));
+  return Math.max(
+    config.bargeInMinRms,
+    noiseFloorRms * config.bargeInNoiseFloorMultiplier,
+    config.minSpeechRms + safeOutputAmp * config.bargeInOutputEchoMultiplier,
+  );
+}
+
+/**
+ * Pure, deterministic step function for Local Browser Voice Activity Detection (Phase 1 + Phase 2 Smart Barge-in).
  *
  * Guarantees:
- * - While `isPlaybackOrProcessingPaused === true` (transcribing, thinking, synthesizing, speaking, or audio tail),
+ * - While `isPlaybackOrProcessingPaused === true` (transcribing, thinking, synthesizing, or audio tail),
  *   the detector NEVER triggers speech start, NEVER submits self-audio to STT, and pauses the user idle timeout clock.
+ * - While `isMascotSpeaking === true` (and `isPlaybackOrProcessingPaused === false`), enforces Echo-Aware Dynamic Barge-in:
+ *   requires `rms >= computeDynamicBargeInThreshold(...)`, `voiceBandRatio >= bargeInMinVoiceBandRatio`,
+ *   `mascotOutputAmplitude <= maxSafeBargeInOutputAmplitude`, and continuous speech hold for `bargeInHoldMs` (~300 ms)
+ *   before emitting `'BARGE_IN_CONFIRMED'`.
  * - Adapts speech and silence thresholds dynamically to the ambient noise floor.
- * - Requires continuous speech energy for `speechStartHoldMs` (~200 ms) before confirming Speech Start.
+ * - Requires continuous speech energy for `speechStartHoldMs` (~200 ms) before confirming normal Speech Start.
  * - Requires continuous silence for `silenceEndOfTurnMs` (~1,050 ms) before committing End-of-Turn.
  * - Discards brief noises shorter than `minValidUtteranceMs` without calling STT.
  * - Prevents duplicate STT submissions for the same turn via `utteranceCommittedForTurn`.
@@ -225,9 +268,11 @@ export function stepVadState(
     voiceBandRatio = 1,
     isPlaybackOrProcessingPaused,
     kioskStandbyMode = false,
+    isMascotSpeaking = false,
+    mascotOutputAmplitude = 0,
   } = input;
 
-  // 1. Self-Listening Prevention & Processing Pause (Phase 1: No Barge-in)
+  // 1. Self-Listening Prevention & Processing Pause
   if (isPlaybackOrProcessingPaused) {
     const pausedState: VadEngineState = {
       ...prevState,
@@ -245,6 +290,123 @@ export function stepVadState(
       utteranceDurationMs: 0,
       idleElapsedMs: 0,
     };
+  }
+
+  // 1B. Phase 2 Smart Barge-in Mode while Mascot is actively speaking
+  if (isMascotSpeaking) {
+    const preservedNoiseFloor = prevState.noiseFloorRms;
+    const bargeInThreshold = computeDynamicBargeInThreshold(
+      preservedNoiseFloor,
+      mascotOutputAmplitude,
+      config,
+    );
+    const bargeInHoldFloor = Math.max(
+      config.minSilenceRms,
+      bargeInThreshold * 0.75,
+    );
+    const isOutputSaturated =
+      mascotOutputAmplitude > config.maxSafeBargeInOutputAmplitude;
+    const hasBargeInVoiceBand =
+      voiceBandRatio >= config.bargeInMinVoiceBandRatio;
+
+    const isBargeInStartFrame =
+      !isOutputSaturated && rms >= bargeInThreshold && hasBargeInVoiceBand;
+    const isBargeInSustainFrame =
+      !isOutputSaturated && rms >= bargeInHoldFloor && hasBargeInVoiceBand;
+
+    if (prevState.phase === 'LISTENING') {
+      if (isBargeInStartFrame && !prevState.utteranceCommittedForTurn) {
+        return {
+          state: {
+            ...prevState,
+            phase: 'SPEECH_STARTING',
+            speechCandidateStartMs: nowMs,
+            confirmedSpeechStartMs: null,
+            silenceStartMs: null,
+            listeningIdleStartMs: nowMs,
+            lastFrameMs: nowMs,
+            currentSpeechThreshold: bargeInThreshold,
+            currentSilenceThreshold: bargeInHoldFloor,
+          },
+          action: 'NONE',
+          utteranceDurationMs: 0,
+          idleElapsedMs: 0,
+        };
+      }
+
+      return {
+        state: {
+          ...prevState,
+          listeningIdleStartMs: nowMs,
+          lastFrameMs: nowMs,
+          currentSpeechThreshold: bargeInThreshold,
+          currentSilenceThreshold: bargeInHoldFloor,
+        },
+        action: 'NONE',
+        utteranceDurationMs: 0,
+        idleElapsedMs: 0,
+      };
+    }
+
+    if (prevState.phase === 'SPEECH_STARTING') {
+      const startMs = prevState.speechCandidateStartMs ?? nowMs;
+      if (!isBargeInSustainFrame) {
+        return {
+          state: {
+            ...prevState,
+            phase: 'LISTENING',
+            speechCandidateStartMs: null,
+            confirmedSpeechStartMs: null,
+            silenceStartMs: null,
+            listeningIdleStartMs: nowMs,
+            lastFrameMs: nowMs,
+            currentSpeechThreshold: bargeInThreshold,
+            currentSilenceThreshold: bargeInHoldFloor,
+          },
+          action: 'DISCARD_SHORT_NOISE',
+          utteranceDurationMs: Math.max(0, nowMs - startMs),
+          idleElapsedMs: 0,
+        };
+      }
+
+      const heldDurationMs = Math.max(0, nowMs - startMs);
+      if (heldDurationMs >= config.bargeInHoldMs) {
+        return {
+          state: {
+            ...prevState,
+            phase: 'SPEAKING',
+            confirmedSpeechStartMs: startMs,
+            silenceStartMs: null,
+            listeningIdleStartMs: nowMs,
+            lastFrameMs: nowMs,
+            currentSpeechThreshold: Math.max(
+              config.minSpeechRms,
+              preservedNoiseFloor * config.noiseFloorSpeechMultiplier,
+            ),
+            currentSilenceThreshold: Math.max(
+              config.minSilenceRms,
+              preservedNoiseFloor * config.noiseFloorSilenceMultiplier,
+            ),
+          },
+          action: 'BARGE_IN_CONFIRMED',
+          utteranceDurationMs: heldDurationMs,
+          idleElapsedMs: 0,
+        };
+      }
+
+      return {
+        state: {
+          ...prevState,
+          listeningIdleStartMs: nowMs,
+          lastFrameMs: nowMs,
+          currentSpeechThreshold: bargeInThreshold,
+          currentSilenceThreshold: bargeInHoldFloor,
+        },
+        action: 'NONE',
+        utteranceDurationMs: heldDurationMs,
+        idleElapsedMs: 0,
+      };
+    }
   }
 
   let nextNoiseFloor = prevState.noiseFloorRms;

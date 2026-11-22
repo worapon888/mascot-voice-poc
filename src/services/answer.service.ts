@@ -8,7 +8,7 @@ import {
   resolvePersistentFaqAudioRef,
 } from '@/services/faq-audio.service';
 import { retrieveMatchingFaqs } from '@/services/faq-matching.service';
-import type { AnswerMode, AnswerResponse } from '@/types/api';
+import type { AnswerMode, AnswerResponse, ConversationTurn } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
 
 export const NO_MATCH_FALLBACK_ANSWER =
@@ -19,6 +19,8 @@ export const NO_MATCH_FALLBACK_ANSWER =
  * Ensures total prompt input remains strictly bounded (< ~800 tokens) without external tokenizer overhead.
  */
 const MAX_FAQ_CONTEXT_CHARS = 1_500;
+const MAX_CONVERSATION_CONTEXT_CHARS = 1_000;
+const MAX_CONVERSATION_TURNS = 4;
 const MAX_LLM_OUTPUT_TOKENS = 220;
 const THAI_TEXT_REGEX = /[\u0E00-\u0E7F]/;
 const TRAILING_POLITE_PARTICLE_REGEX = /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)$/u;
@@ -122,6 +124,61 @@ function buildBoundedFaqContext(faqs: FaqRecord[]): string {
   }
 
   return blocks.join('\n\n').slice(0, MAX_FAQ_CONTEXT_CHARS);
+}
+
+/**
+ * Formats a bounded sliding window (up to 4 most recent turns) of conversation history
+ * for multi-turn follow-up disambiguation.
+ */
+export function buildBoundedConversationHistoryContext(
+  conversationHistory: ReadonlyArray<ConversationTurn>,
+): string {
+  if (!conversationHistory || conversationHistory.length === 0) {
+    return '';
+  }
+
+  const recentTurns = conversationHistory.slice(-MAX_CONVERSATION_TURNS);
+  const lines: string[] = [];
+  let currentLength = 0;
+
+  for (const turn of recentTurns) {
+    const roleLabel = turn.role === 'user' ? 'ผู้ใช้' : 'มาสคอต';
+    const cleanText = turn.text.trim().slice(0, MAX_TEXT_CHARS);
+    if (!cleanText) {
+      continue;
+    }
+    const faqTag =
+      turn.faqIds && turn.faqIds.length > 0
+        ? ` [อ้างอิง FAQ #${turn.faqIds.join(', #')}]`
+        : '';
+    const line = `${roleLabel}${faqTag}: ${cleanText}`;
+    if (
+      currentLength + line.length > MAX_CONVERSATION_CONTEXT_CHARS &&
+      lines.length > 0
+    ) {
+      break;
+    }
+    lines.push(line);
+    currentLength += line.length + 1;
+  }
+
+  return lines.join('\n').slice(0, MAX_CONVERSATION_CONTEXT_CHARS);
+}
+
+export function buildGroundedFaqPromptInput(
+  faqs: FaqRecord[],
+  sanitizedQuestion: string,
+  conversationHistory: ReadonlyArray<ConversationTurn> = [],
+): string {
+  const boundedContext = buildBoundedFaqContext(faqs);
+  const historyBlock =
+    buildBoundedConversationHistoryContext(conversationHistory);
+
+  if (historyBlock) {
+    return `<faq_evidence>\n${boundedContext}\n</faq_evidence>\n\n<conversation_history>\n${historyBlock}\n</conversation_history>\n\n<user_question>\n${sanitizedQuestion}\n</user_question>`;
+  }
+
+  return `<faq_evidence>\n${boundedContext}\n</faq_evidence>\n\n<user_question>\n${sanitizedQuestion}\n</user_question>`;
 }
 
 /**
@@ -241,9 +298,15 @@ export async function generateGroundedAnswerWithMetrics(
     faq: FaqRecord,
   ) => Promise<PersistentFaqAudioLookupResult> = (faq) =>
     resolvePersistentFaqAudioRef(faq),
+  conversationHistory: ReadonlyArray<ConversationTurn> = [],
+  customLlmResponder?: (
+    userPrompt: string,
+    faqs: FaqRecord[],
+    history: ReadonlyArray<ConversationTurn>,
+  ) => Promise<string>,
 ): Promise<GroundedAnswerWithMetrics> {
   // 1. Retrieve matching FAQs live from Supabase (propagates FaqRepositoryError on DB failure -> HTTP 503)
-  const retrieval = await customRetriever(rawTranscript);
+  const retrieval = await customRetriever(rawTranscript, conversationHistory);
   const sanitizedQuestion = rawTranscript.trim().slice(0, MAX_TEXT_CHARS);
 
   // 2. Unmatched query -> Context-Aware Guarded LLM Fallback (GENERAL_GUIDANCE or ORGANIZATION_INFO_UNKNOWN)
@@ -294,20 +357,33 @@ export async function generateGroundedAnswerWithMetrics(
   }
 
   // 3B. Matched query requiring LLM disambiguation / context checking -> FAQ_GROUNDED mode
-  const boundedContext = buildBoundedFaqContext(retrieval.faqs);
-  const userPrompt = `<faq_evidence>\n${boundedContext}\n</faq_evidence>\n\n<user_question>\n${sanitizedQuestion}\n</user_question>`;
+  const userPrompt = buildGroundedFaqPromptInput(
+    retrieval.faqs,
+    sanitizedQuestion,
+    conversationHistory,
+  );
 
-  const client = getOpenAIClient();
   const tLlmStart = performance.now();
-  const response = await client.responses.create({
-    model: OPENAI_MODELS.LLM,
-    instructions: GROUNDED_FAQ_SYSTEM_INSTRUCTIONS,
-    input: userPrompt,
-    max_output_tokens: MAX_LLM_OUTPUT_TOKENS,
-  });
+  let rawLlmOutput: string;
+  if (customLlmResponder) {
+    rawLlmOutput = await customLlmResponder(
+      userPrompt,
+      retrieval.faqs,
+      conversationHistory,
+    );
+  } else {
+    const client = getOpenAIClient();
+    const response = await client.responses.create({
+      model: OPENAI_MODELS.LLM,
+      instructions: GROUNDED_FAQ_SYSTEM_INSTRUCTIONS,
+      input: userPrompt,
+      max_output_tokens: MAX_LLM_OUTPUT_TOKENS,
+    });
+    rawLlmOutput = response.output_text ?? '';
+  }
   const llmLatencyMs = Math.round(performance.now() - tLlmStart);
 
-  let answerText = (response.output_text ?? '').normalize('NFC').trim();
+  let answerText = rawLlmOutput.normalize('NFC').trim();
 
   if (!answerText || !THAI_TEXT_REGEX.test(answerText)) {
     throw new ApiError(
@@ -315,6 +391,16 @@ export async function generateGroundedAnswerWithMetrics(
       502,
       'ไม่สามารถสร้างคำตอบภาษาไทยที่ถูกต้องจากระบบ AI ได้',
     );
+  }
+
+  // Guard against fabricated floor numbers, prices, or unverified times not present in the matched FAQ evidence
+  const evidenceCombinedText = retrieval.faqs.map((f) => f.answer).join(' ');
+  const hasFabricatedClaimNotInEvidence = FABRICATED_CLAIM_PATTERNS.some(
+    (pattern) =>
+      pattern.test(answerText) && !pattern.test(evidenceCombinedText),
+  );
+  if (hasFabricatedClaimNotInEvidence) {
+    answerText = formatCanonicalFaqAnswer(retrieval.faqs[0].answer);
   }
 
   // Verify factual anchors when a single authoritative FAQ matched
@@ -357,7 +443,13 @@ export async function generateGroundedAnswerWithMetrics(
  */
 export async function generateGroundedAnswer(
   rawTranscript: string,
+  conversationHistory: ReadonlyArray<ConversationTurn> = [],
 ): Promise<AnswerResponse> {
-  const { response } = await generateGroundedAnswerWithMetrics(rawTranscript);
+  const { response } = await generateGroundedAnswerWithMetrics(
+    rawTranscript,
+    retrieveMatchingFaqs,
+    (faq) => resolvePersistentFaqAudioRef(faq),
+    conversationHistory,
+  );
   return response;
 }
