@@ -19,6 +19,12 @@ import {
   type TimestampedAudioChunk,
 } from '@/lib/voice/vad-engine';
 import {
+  downsamplePcm,
+  encodeWav,
+  mergeFloat32Arrays,
+  PcmRingBuffer,
+} from '@/lib/voice/wav-encoder';
+import {
   buildGroundedFaqPromptInput,
   generateGroundedAnswerWithMetrics,
 } from '@/services/answer.service';
@@ -26,6 +32,7 @@ import {
   hasContextualFollowUpSignal,
   matchFaqsWithConversationContext,
 } from '@/services/faq-matching.service';
+import { detectAudioFormatFromSignature } from '@/services/transcription.service';
 import type { AnswerResponse, ConversationTurn } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
 
@@ -845,6 +852,564 @@ const tests: TestCase[] = [
         ttsCalls,
         2,
         'Smart Retry must only retry the failed TTS stage',
+      );
+    },
+  },
+  {
+    id: 'P2-11',
+    title:
+      'PCM Ring Buffer & Downsampling: Sample-accurate 400ms pre-roll preservation and 48kHz -> 16kHz downsampling without container headers',
+    run: async () => {
+      const sampleRate = 48000;
+      const ring = new PcmRingBuffer({
+        sampleRate,
+        maxBufferDurationMs: 1500, // 72,000 samples capacity
+      });
+
+      // 1. Initial empty buffer returns empty array
+      const initialPreRoll = ring.getRecentSamples(400, sampleRate);
+      assert.equal(
+        initialPreRoll.length,
+        0,
+        'Empty ring buffer must return 0 samples',
+      );
+
+      // 2. Push 100ms chunks (4800 samples each) for 1000ms (10 chunks = 48,000 samples)
+      for (let c = 0; c < 10; c++) {
+        const chunk = new Float32Array(4800);
+        for (let i = 0; i < 4800; i++) {
+          chunk[i] = (c * 4800 + i) / 48000;
+        }
+        ring.push(chunk);
+      }
+
+      // Extract 400ms pre-roll (19,200 samples)
+      const preRoll400ms = ring.getRecentSamples(400, sampleRate);
+      assert.equal(
+        preRoll400ms.length,
+        19200,
+        '400ms pre-roll at 48kHz must yield exactly 19,200 samples',
+      );
+      // Last sample of pre-roll must match the most recently pushed sample
+      const expectedLastSample = (48000 - 1) / 48000;
+      assert.ok(
+        Math.abs(preRoll400ms[preRoll400ms.length - 1] - expectedLastSample) <
+          0.0001,
+        'Last sample of pre-roll must correspond to the latest sample pushed',
+      );
+
+      // 3. Test circular overwrite: push another 2000ms of audio (exceeding 1500ms capacity)
+      for (let c = 0; c < 20; c++) {
+        const chunk = new Float32Array(4800);
+        chunk.fill(1.0);
+        ring.push(chunk);
+      }
+      const wrappedPreRoll = ring.getRecentSamples(400, sampleRate);
+      assert.equal(wrappedPreRoll.length, 19200);
+      assert.equal(
+        wrappedPreRoll[0],
+        1.0,
+        'Ring buffer wrap must seamlessly provide latest samples',
+      );
+
+      // 4. Test downsampling 48kHz -> 16kHz
+      const testPcm48k = new Float32Array(48000); // 1 second
+      for (let i = 0; i < 48000; i++) {
+        testPcm48k[i] = Math.sin((2 * Math.PI * 440 * i) / 48000);
+      }
+      const downsampled16k = downsamplePcm(testPcm48k, 48000, 16000);
+      assert.equal(
+        downsampled16k.length,
+        16000,
+        'Downsampling 48kHz to 16kHz for 1 sec must produce exactly 16,000 samples',
+      );
+
+      // 5. Test merging Float32Array chunks
+      const chunkA = new Float32Array([0.1, 0.2]);
+      const chunkB = new Float32Array([0.3, 0.4, 0.5]);
+      const merged = mergeFloat32Arrays([chunkA, chunkB]);
+      assert.equal(merged.length, 5);
+      assert.ok(Math.abs(merged[0] - 0.1) < 0.0001);
+      assert.ok(Math.abs(merged[4] - 0.5) < 0.0001);
+    },
+  },
+  {
+    id: 'P2-12',
+    title:
+      'WAV RIFF 16-bit Mono Encoder: Produces compliant 16kHz WAV header and passes detectAudioFormatFromSignature for Whisper STT',
+    run: async () => {
+      const sampleRate = 16000;
+      const durationSeconds = 2;
+      const sampleCount = sampleRate * durationSeconds; // 32,000 samples
+      const pcmSamples = new Float32Array(sampleCount);
+
+      // Fill with synthetic speech test tone
+      for (let i = 0; i < sampleCount; i++) {
+        pcmSamples[i] = 0.5 * Math.sin((2 * Math.PI * 300 * i) / sampleRate);
+      }
+
+      const wavBytes = encodeWav(pcmSamples, sampleRate);
+      assert.ok(
+        wavBytes instanceof Uint8Array,
+        'encodeWav must return Uint8Array',
+      );
+
+      // 44 bytes header + (32000 samples * 2 bytes/sample) = 64,044 bytes
+      const expectedByteLength = 44 + sampleCount * 2;
+      assert.equal(
+        wavBytes.byteLength,
+        expectedByteLength,
+        `Expected ${expectedByteLength} bytes for 2s 16kHz mono 16-bit WAV, got ${wavBytes.byteLength}`,
+      );
+
+      // Validate header signatures
+      const nodeBuffer = Buffer.from(wavBytes);
+      const detected = detectAudioFormatFromSignature(nodeBuffer);
+      assert.ok(
+        detected !== null,
+        'detectAudioFormatFromSignature must recognize WAV',
+      );
+      assert.equal(detected?.ext, 'wav');
+      assert.equal(detected?.mime, 'audio/wav');
+
+      // Validate specific RIFF header offsets
+      const view = new DataView(
+        wavBytes.buffer,
+        wavBytes.byteOffset,
+        wavBytes.byteLength,
+      );
+      // Bytes 0..3: RIFF
+      assert.equal(
+        String.fromCharCode(wavBytes[0], wavBytes[1], wavBytes[2], wavBytes[3]),
+        'RIFF',
+      );
+      // Bytes 8..11: WAVE
+      assert.equal(
+        String.fromCharCode(
+          wavBytes[8],
+          wavBytes[9],
+          wavBytes[10],
+          wavBytes[11],
+        ),
+        'WAVE',
+      );
+      // AudioFormat at byte 20 == 1 (Linear PCM)
+      assert.equal(view.getUint16(20, true), 1, 'AudioFormat must be 1 (PCM)');
+      // NumChannels at byte 22 == 1 (Mono)
+      assert.equal(view.getUint16(22, true), 1, 'NumChannels must be 1 (Mono)');
+      // SampleRate at byte 24 == 16000
+      assert.equal(view.getUint32(24, true), 16000, 'SampleRate must be 16000');
+      // BitsPerSample at byte 34 == 16
+      assert.equal(view.getUint16(34, true), 16, 'BitsPerSample must be 16');
+      // Subchunk2ID at bytes 36..39 == "data"
+      assert.equal(
+        String.fromCharCode(
+          wavBytes[36],
+          wavBytes[37],
+          wavBytes[38],
+          wavBytes[39],
+        ),
+        'data',
+      );
+      // Subchunk2Size at byte 40 == sampleCount * 2
+      assert.equal(view.getUint32(40, true), sampleCount * 2);
+    },
+  },
+  {
+    id: 'P2-13',
+    title:
+      'Multi-Turn Hands-Free Continuity: Verifies RAF loop scheduling across 5 complete turns including Barge-in, Playback Error recovery, Mode Switch, and clean teardown',
+    run: async () => {
+      let nowMs = 1000;
+      let nextRafId = 1;
+      let activeRafId: number | null = null;
+      const rafQueue = new Map<number, () => void>();
+
+      const mockRequestAnimationFrame = (fn: () => void): number => {
+        if (activeRafId !== null) {
+          rafQueue.delete(activeRafId);
+        }
+        const id = nextRafId++;
+        rafQueue.set(id, fn);
+        activeRafId = id;
+        return id;
+      };
+
+      const mockCancelAnimationFrame = (id: number): void => {
+        rafQueue.delete(id);
+        if (activeRafId === id) {
+          activeRafId = null;
+        }
+      };
+
+      let isHandsFreeMode = true;
+      let isVadPaused = false;
+      let isMascotSpeaking = false;
+      let mascotOutputAmplitude = 0;
+      let vadState = createInitialVadState(nowMs, DEFAULT_VAD_CONFIG);
+      const ringBuffer = new PcmRingBuffer({
+        sampleRate: 16000,
+        maxBufferDurationMs: 1500,
+      });
+      let pcmCollector: Float32Array[] = [];
+      let isCollectingPcm = false;
+      let lastCommittedPayload: {
+        blob: Blob;
+        mimeType: string;
+        durationSeconds: number;
+      } | null = null;
+
+      // Core simulation frame function modeling use-voice-recorder.ts
+      const sampleMicFrame = (rms: number, voiceBandRatio: number) => {
+        if (!isHandsFreeMode) {
+          return;
+        }
+
+        const step = stepVadState(
+          vadState,
+          {
+            nowMs,
+            rms,
+            voiceBandRatio,
+            isPlaybackOrProcessingPaused: isVadPaused,
+            isMascotSpeaking,
+            mascotOutputAmplitude,
+          },
+          DEFAULT_VAD_CONFIG,
+        );
+        vadState = step.state;
+
+        if (step.action === 'SPEECH_START_CONFIRMED') {
+          if (!isCollectingPcm) {
+            isCollectingPcm = true;
+            const preRoll = ringBuffer.getRecentSamples(400, 16000);
+            pcmCollector = preRoll.length > 0 ? [preRoll] : [];
+          }
+        } else if (step.action === 'BARGE_IN_CONFIRMED') {
+          isMascotSpeaking = false;
+          if (!isCollectingPcm) {
+            isCollectingPcm = true;
+            const preRoll = ringBuffer.getRecentSamples(400, 16000);
+            pcmCollector = preRoll.length > 0 ? [preRoll] : [];
+          }
+        } else if (
+          step.action === 'END_OF_SPEECH_COMMIT' ||
+          step.action === 'MAX_UTTERANCE_COMMIT'
+        ) {
+          isVadPaused = true;
+          isMascotSpeaking = false;
+          isCollectingPcm = false;
+
+          const collected = pcmCollector;
+          pcmCollector = [];
+
+          if (collected.length > 0) {
+            const rawPcm = mergeFloat32Arrays(collected);
+            if (rawPcm.length > 0) {
+              const wavBytes = encodeWav(rawPcm, 16000);
+              const blob = new Blob([wavBytes.buffer as ArrayBuffer], {
+                type: 'audio/wav',
+              });
+              lastCommittedPayload = {
+                blob,
+                mimeType: 'audio/wav',
+                durationSeconds: Math.max(1, Math.round(rawPcm.length / 16000)),
+              };
+
+              // CRITICAL: Reschedule RAF frame so sampling loop remains active during pause/playback
+              if (isHandsFreeMode) {
+                activeRafId = mockRequestAnimationFrame(() => {});
+              }
+              return;
+            }
+          }
+        }
+
+        if (isHandsFreeMode) {
+          activeRafId = mockRequestAnimationFrame(() => {});
+        }
+      };
+
+      const stepFrame = (
+        rms: number,
+        voiceBandRatio: number,
+        elapsedMs: number,
+      ) => {
+        nowMs += elapsedMs;
+        // Generate simulated PCM samples corresponding to rms
+        const sampleCount = Math.floor((16000 * elapsedMs) / 1000);
+        const chunk = new Float32Array(sampleCount);
+        chunk.fill(rms);
+        ringBuffer.push(chunk);
+        if (isCollectingPcm) {
+          pcmCollector.push(chunk);
+        }
+
+        // Execute frame
+        sampleMicFrame(rms, voiceBandRatio);
+      };
+
+      const resumeHandsFree = (applyCooldown: boolean) => {
+        if (applyCooldown) {
+          nowMs += DEFAULT_VAD_CONFIG.postPlaybackCooldownMs;
+        }
+        vadState = resetVadStateForNextTurn(
+          vadState,
+          nowMs,
+          DEFAULT_VAD_CONFIG,
+        );
+        isMascotSpeaking = false;
+        isVadPaused = false;
+        ringBuffer.clear();
+        pcmCollector = [];
+        isCollectingPcm = false;
+      };
+
+      const startBargeInMonitoring = () => {
+        vadState = resetVadStateForNextTurn(
+          vadState,
+          nowMs,
+          DEFAULT_VAD_CONFIG,
+        );
+        isMascotSpeaking = true;
+        isVadPaused = false;
+        pcmCollector = [];
+        isCollectingPcm = false;
+      };
+
+      const stopHandsFreeSession = () => {
+        isHandsFreeMode = false;
+        if (activeRafId !== null) {
+          mockCancelAnimationFrame(activeRafId);
+        }
+      };
+
+      // Bootstrap: initialize first RAF
+      activeRafId = mockRequestAnimationFrame(() => {});
+      assert.ok(
+        activeRafId !== null,
+        'Session bootstrap must register initial RAF',
+      );
+
+      // -----------------------------------------------------------------------
+      // TURN 1: First Question (Normal Speech -> Commit -> Playback -> Resume)
+      // -----------------------------------------------------------------------
+      // Ambient silence (200ms)
+      for (let i = 0; i < 4; i++) stepFrame(0.005, 0.1, 50);
+      assert.equal(vadState.phase, 'LISTENING');
+
+      // User speaks: RMS 0.15 for 300ms -> Confirms speech start
+      for (let i = 0; i < 6; i++) stepFrame(0.15, 0.85, 50);
+      assert.equal(
+        vadState.phase,
+        'SPEAKING',
+        'Turn 1 must transition to SPEAKING',
+      );
+
+      // User continues speaking for 1,000ms
+      for (let i = 0; i < 20; i++) stepFrame(0.18, 0.9, 50);
+
+      // User stops speaking: Silence for 1,150ms -> Commits utterance
+      for (let i = 0; i < 23; i++) stepFrame(0.005, 0.1, 50);
+
+      // Verify Turn 1 committed WAV
+      const payload1 = lastCommittedPayload as {
+        blob: Blob;
+        mimeType: string;
+        durationSeconds: number;
+      } | null;
+      if (!payload1) {
+        throw new Error('Turn 1 must produce committed audio payload');
+      }
+      assert.equal(payload1.mimeType, 'audio/wav');
+      assert.equal(
+        detectAudioFormatFromSignature(
+          Buffer.from(await payload1.blob.arrayBuffer()),
+        )?.ext,
+        'wav',
+      );
+
+      // CRITICAL VERIFICATION: RAF loop must NOT be dead!
+      assert.ok(
+        activeRafId !== null && rafQueue.size > 0,
+        'CRITICAL: RAF sampling loop must remain scheduled and active after Turn 1 commit',
+      );
+      assert.equal(
+        isVadPaused,
+        true,
+        'VAD must be paused while processing Turn 1',
+      );
+
+      // Simulate mascot playback and resumption
+      startBargeInMonitoring();
+      nowMs += 2000; // Mascot speaks for 2s
+      resumeHandsFree(true);
+      assert.equal(
+        isVadPaused,
+        false,
+        'VAD must unpause after post-playback cooldown',
+      );
+      assert.equal(
+        vadState.phase,
+        'LISTENING',
+        'VAD must return to LISTENING for Turn 2',
+      );
+
+      // -----------------------------------------------------------------------
+      // TURN 2: Second Question (Previously FAILED due to Dead Loop)
+      // -----------------------------------------------------------------------
+      lastCommittedPayload = null;
+
+      // User speaks Turn 2 question
+      for (let i = 0; i < 6; i++) stepFrame(0.16, 0.88, 50);
+      assert.equal(
+        vadState.phase,
+        'SPEAKING',
+        'Turn 2 must successfully detect speech because RAF loop is alive',
+      );
+
+      // User speaks for 800ms
+      for (let i = 0; i < 16; i++) stepFrame(0.15, 0.85, 50);
+
+      // Silence for 1,150ms -> Commits Turn 2
+      for (let i = 0; i < 23; i++) stepFrame(0.005, 0.1, 50);
+
+      const payload2 = lastCommittedPayload as {
+        blob: Blob;
+        mimeType: string;
+        durationSeconds: number;
+      } | null;
+      if (!payload2) {
+        throw new Error('Turn 2 must commit successfully');
+      }
+      assert.equal(payload2.mimeType, 'audio/wav');
+      assert.ok(
+        activeRafId !== null && rafQueue.size > 0,
+        'RAF loop must still be active after Turn 2',
+      );
+
+      // Mascot playback and resumption
+      startBargeInMonitoring();
+      nowMs += 1500;
+      resumeHandsFree(true);
+      assert.equal(vadState.phase, 'LISTENING');
+
+      // -----------------------------------------------------------------------
+      // TURN 3: Third Question with Smart Barge-in
+      // -----------------------------------------------------------------------
+      lastCommittedPayload = null;
+      startBargeInMonitoring();
+      mascotOutputAmplitude = 0.5; // Mascot is speaking loudly
+
+      // User interrupts mascot with loud voice (> dynamic barge-in threshold) for 350ms
+      for (let i = 0; i < 7; i++) stepFrame(0.35, 0.88, 50);
+      assert.equal(
+        vadState.phase,
+        'SPEAKING',
+        'Barge-in speech must interrupt mascot and enter SPEAKING',
+      );
+
+      // User finishes barge-in sentence for 1,000ms
+      for (let i = 0; i < 20; i++) stepFrame(0.2, 0.85, 50);
+
+      // Silence for 1,150ms -> Commits Turn 3
+      for (let i = 0; i < 23; i++) stepFrame(0.005, 0.1, 50);
+
+      const payload3 = lastCommittedPayload as {
+        blob: Blob;
+        mimeType: string;
+        durationSeconds: number;
+      } | null;
+      if (!payload3) {
+        throw new Error('Turn 3 (Barge-in) must commit successfully');
+      }
+      assert.ok(activeRafId !== null && rafQueue.size > 0);
+
+      // Mascot finishes replying to Turn 3
+      mascotOutputAmplitude = 0;
+      resumeHandsFree(true);
+      assert.equal(vadState.phase, 'LISTENING');
+
+      // -----------------------------------------------------------------------
+      // TURN 4: Fourth Question with Playback Error Recovery
+      // -----------------------------------------------------------------------
+      lastCommittedPayload = null;
+
+      // User speaks Turn 4
+      for (let i = 0; i < 6; i++) stepFrame(0.14, 0.85, 50);
+      assert.equal(vadState.phase, 'SPEAKING');
+      for (let i = 0; i < 10; i++) stepFrame(0.14, 0.85, 50);
+      for (let i = 0; i < 23; i++) stepFrame(0.005, 0.1, 50);
+      const payload4 = lastCommittedPayload as {
+        blob: Blob;
+        mimeType: string;
+        durationSeconds: number;
+      } | null;
+      if (!payload4) {
+        throw new Error('Turn 4 must commit successfully');
+      }
+
+      // Simulate Playback Error (e.g. Autoplay blocked or decode error)
+      // Error recovery must immediately resume listening WITHOUT waiting for post-playback cooldown
+      resumeHandsFree(false);
+      assert.equal(
+        isVadPaused,
+        false,
+        'Playback error recovery must immediately unpause VAD',
+      );
+      assert.equal(vadState.phase, 'LISTENING');
+      assert.ok(
+        activeRafId !== null && rafQueue.size > 0,
+        'RAF loop must remain alive after error recovery',
+      );
+
+      // -----------------------------------------------------------------------
+      // TURN 5: Fifth Question & Clean Mode Switch / Session Teardown
+      // -----------------------------------------------------------------------
+      lastCommittedPayload = null;
+
+      // User speaks Turn 5
+      for (let i = 0; i < 6; i++) stepFrame(0.15, 0.87, 50);
+      assert.equal(
+        vadState.phase,
+        'SPEAKING',
+        'Turn 5 must detect speech cleanly',
+      );
+      for (let i = 0; i < 10; i++) stepFrame(0.15, 0.87, 50);
+      for (let i = 0; i < 23; i++) stepFrame(0.005, 0.1, 50);
+      const payload5 = lastCommittedPayload as {
+        blob: Blob;
+        mimeType: string;
+        durationSeconds: number;
+      } | null;
+      if (!payload5) {
+        throw new Error('Turn 5 must commit successfully');
+      }
+
+      // User switches mode to Push-to-Talk or closes session: clean teardown
+      stopHandsFreeSession();
+      assert.equal(
+        isHandsFreeMode,
+        false,
+        'isHandsFreeMode must be false after stop',
+      );
+      assert.equal(
+        activeRafId,
+        null,
+        'activeRafId must be null after session stop',
+      );
+      assert.equal(
+        rafQueue.size,
+        0,
+        'RAF queue must be completely empty with zero leaks',
+      );
+
+      // Attempting to step frame after stop must immediately bail out
+      stepFrame(0.2, 0.85, 50);
+      assert.equal(
+        rafQueue.size,
+        0,
+        'Stopped session must never schedule further RAF frames',
       );
     },
   },

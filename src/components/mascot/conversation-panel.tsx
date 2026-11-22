@@ -12,6 +12,13 @@ interface ConversationPanelProps {
   canRetry: boolean;
   onRetry: () => void;
   expanded?: boolean;
+  diagnostics?: {
+    source: string;
+    mimeType: string;
+    byteSize: number;
+    durationSeconds: number;
+    audioUrl?: string;
+  } | null;
 }
 
 function getAnswerModePresentation(
@@ -58,6 +65,7 @@ export function ConversationPanel({
   canRetry,
   onRetry,
   expanded = false,
+  diagnostics,
 }: ConversationPanelProps) {
   const modePresentation = getAnswerModePresentation(
     matched,
@@ -140,6 +148,54 @@ export function ConversationPanel({
             {answer || 'คำตอบและเสียงพูดภาษาไทยจะแสดงที่นี่หลังส่งคำถาม'}
           </p>
         </div>
+
+        {/* Development Audio Diagnostics Box */}
+        {expanded && diagnostics && (
+          <div
+            data-testid="audio-diagnostics-card"
+            className="rounded-xl border border-indigo-200 bg-indigo-50/90 px-3.5 py-2.5 text-xs text-indigo-950 shadow-2xs"
+          >
+            <div className="flex items-center justify-between">
+              <p className="font-semibold text-indigo-900">
+                🔍 Audio Payload Diagnostics
+              </p>
+              <span className="rounded-full bg-indigo-200/80 px-2 py-0.5 text-[10px] font-medium text-indigo-900">
+                {diagnostics.source}
+              </span>
+            </div>
+            <div className="mt-1.5 grid grid-cols-1 gap-1 text-[11px] text-indigo-800 sm:grid-cols-3">
+              <div>
+                <span className="text-indigo-600">Format:</span>{' '}
+                <code className="font-mono">{diagnostics.mimeType}</code>
+              </div>
+              <div>
+                <span className="text-indigo-600">Size:</span>{' '}
+                <span className="font-mono">
+                  {(diagnostics.byteSize / 1024).toFixed(1)} KB (
+                  {diagnostics.byteSize} B)
+                </span>
+              </div>
+              <div>
+                <span className="text-indigo-600">Duration:</span>{' '}
+                <span className="font-mono">
+                  ~{diagnostics.durationSeconds}s
+                </span>
+              </div>
+            </div>
+            {diagnostics.audioUrl && (
+              <div className="mt-2 flex flex-col gap-1 border-t border-indigo-200/60 pt-2 sm:flex-row sm:items-center sm:gap-3">
+                <span className="shrink-0 text-[11px] font-medium text-indigo-700">
+                  🔊 ฟังเสียงที่บันทึกล่าสุด:
+                </span>
+                <audio
+                  controls
+                  src={diagnostics.audioUrl}
+                  className="h-7 w-full max-w-[260px]"
+                />
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Bottom Sample Questions Line matching the reference screenshot */}

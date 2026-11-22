@@ -18,6 +18,12 @@ import {
   type VadEngineState,
   type VadThresholdConfig,
 } from '@/lib/voice/vad-engine';
+import {
+  downsamplePcm,
+  encodeWav,
+  mergeFloat32Arrays,
+  PcmRingBuffer,
+} from '@/lib/voice/wav-encoder';
 
 const PREFERRED_MIME_TYPES = [
   'audio/webm;codecs=opus',
@@ -32,6 +38,15 @@ export interface RecordedAudioPayload {
   blob: Blob;
   mimeType: string;
   durationSeconds: number;
+}
+
+export interface AudioRecordingDiagnostics {
+  source: 'hands-free-pcm-wav' | 'push-to-talk-media-recorder';
+  mimeType: string;
+  byteSize: number;
+  durationSeconds: number;
+  sampleRate: number;
+  timestamp: number;
 }
 
 export function detectSupportedRecordingMimeType(): string | null {
@@ -106,6 +121,14 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
   const micAudioContextRef = useRef<AudioContext | null>(null);
   const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const micAnalyserNodeRef = useRef<AnalyserNode | null>(null);
+  const scriptProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const silentGainNodeRef = useRef<GainNode | null>(null);
+  const ringBufferRef = useRef<PcmRingBuffer | null>(null);
+  const pcmCollectorRef = useRef<Float32Array[]>([]);
+  const isCollectingPcmRef = useRef<boolean>(false);
+  const lastAudioDiagnosticsRef = useRef<AudioRecordingDiagnostics | null>(
+    null,
+  );
   const vadRafIdRef = useRef<number | null>(null);
   const vadStateRef = useRef<VadEngineState>(createInitialVadState(0));
   const startHandsFreeSegmentRef = useRef<() => void>(() => {});
@@ -175,6 +198,23 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
 
   const disconnectMicAudioGraph = useCallback(() => {
     stopVadLoop();
+    if (scriptProcessorNodeRef.current) {
+      try {
+        scriptProcessorNodeRef.current.disconnect();
+        scriptProcessorNodeRef.current.onaudioprocess = null;
+      } catch {
+        // Ignore
+      }
+      scriptProcessorNodeRef.current = null;
+    }
+    if (silentGainNodeRef.current) {
+      try {
+        silentGainNodeRef.current.disconnect();
+      } catch {
+        // Ignore
+      }
+      silentGainNodeRef.current = null;
+    }
     if (micSourceNodeRef.current) {
       try {
         micSourceNodeRef.current.disconnect();
@@ -184,6 +224,9 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
       micSourceNodeRef.current = null;
     }
     micAnalyserNodeRef.current = null;
+    ringBufferRef.current = null;
+    pcmCollectorRef.current = [];
+    isCollectingPcmRef.current = false;
   }, [stopVadLoop]);
 
   const stopMediaTracks = useCallback(() => {
@@ -494,6 +537,50 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
       micSourceNodeRef.current = source;
       micAnalyserNodeRef.current = analyser;
 
+      // ScriptProcessorNode for sample-accurate PCM pre-roll & audio capture
+      // Prevents WebM/Matroska container header corruption and Opus timestamp discontinuity
+      if (typeof audioCtx.createScriptProcessor === 'function') {
+        try {
+          const bufferSize = 4096;
+          const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+          const silentGain = audioCtx.createGain();
+          silentGain.gain.value = 0;
+
+          source.connect(processor);
+          processor.connect(silentGain);
+          silentGain.connect(audioCtx.destination);
+
+          scriptProcessorNodeRef.current = processor;
+          silentGainNodeRef.current = silentGain;
+
+          ringBufferRef.current = new PcmRingBuffer({
+            sampleRate: audioCtx.sampleRate,
+            maxBufferDurationMs: 1500,
+          });
+          pcmCollectorRef.current = [];
+          isCollectingPcmRef.current = false;
+
+          processor.onaudioprocess = (event) => {
+            if (!isHandsFreeModeRef.current) {
+              return;
+            }
+            const inputData = event.inputBuffer.getChannelData(0);
+            const chunk = new Float32Array(inputData);
+
+            const ring = ringBufferRef.current;
+            if (ring) {
+              ring.push(chunk);
+            }
+
+            if (isCollectingPcmRef.current) {
+              pcmCollectorRef.current.push(chunk);
+            }
+          };
+        } catch {
+          // Fallback to MediaRecorder if ScriptProcessor cannot be instantiated
+        }
+      }
+
       const timeDomainData = new Uint8Array(analyser.fftSize);
       const frequencyData = new Uint8Array(analyser.frequencyBinCount);
       vadStateRef.current = createInitialVadState(
@@ -551,6 +638,21 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
             step.state.confirmedSpeechStartMs ?? nowMs;
           setIsRecording(true);
           setElapsedSeconds(0);
+
+          // Arm PCM collection with pre-roll buffer from ring buffer
+          if (!isCollectingPcmRef.current && ringBufferRef.current) {
+            isCollectingPcmRef.current = true;
+            const preRoll = ringBufferRef.current.getRecentSamples(
+              vadConfigRef.current.preSpeechBufferMs,
+              audioCtx.sampleRate,
+            );
+            if (preRoll.length > 0) {
+              pcmCollectorRef.current = [preRoll];
+            } else {
+              pcmCollectorRef.current = [];
+            }
+          }
+
           onVadSpeechStartRef.current?.();
         } else if (step.action === 'BARGE_IN_CONFIRMED') {
           isMascotSpeakingRef.current = false;
@@ -558,10 +660,27 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
             step.state.confirmedSpeechStartMs ?? nowMs;
           setIsRecording(true);
           setElapsedSeconds(0);
+
+          // Arm PCM collection with pre-roll buffer from ring buffer for Barge-in
+          if (!isCollectingPcmRef.current && ringBufferRef.current) {
+            isCollectingPcmRef.current = true;
+            const preRoll = ringBufferRef.current.getRecentSamples(
+              vadConfigRef.current.preSpeechBufferMs,
+              audioCtx.sampleRate,
+            );
+            if (preRoll.length > 0) {
+              pcmCollectorRef.current = [preRoll];
+            } else {
+              pcmCollectorRef.current = [];
+            }
+          }
+
           onVadBargeInRef.current?.();
         } else if (step.action === 'DISCARD_SHORT_NOISE') {
           setIsRecording(false);
           setElapsedSeconds(0);
+          isCollectingPcmRef.current = false;
+          pcmCollectorRef.current = [];
           if (!isMascotSpeakingRef.current) {
             onVadSpeechDiscardedRef.current?.();
           }
@@ -574,6 +693,63 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
           isMascotSpeakingRef.current = false;
           setIsRecording(false);
           setMicAmplitude(0);
+          isCollectingPcmRef.current = false;
+
+          const collected = pcmCollectorRef.current;
+          pcmCollectorRef.current = [];
+
+          if (collected.length > 0) {
+            const rawPcm = mergeFloat32Arrays(collected);
+            if (rawPcm.length > 0) {
+              const targetSampleRate = 16_000;
+              const downsampled = downsamplePcm(
+                rawPcm,
+                audioCtx.sampleRate,
+                targetSampleRate,
+              );
+              const wavBytes = encodeWav(downsampled, targetSampleRate);
+              const blob = new Blob([wavBytes.buffer as ArrayBuffer], {
+                type: 'audio/wav',
+              });
+
+              const durationSeconds = Math.max(
+                1,
+                Math.round(downsampled.length / targetSampleRate),
+              );
+
+              lastAudioDiagnosticsRef.current = {
+                source: 'hands-free-pcm-wav',
+                mimeType: 'audio/wav',
+                byteSize: blob.size,
+                durationSeconds,
+                sampleRate: targetSampleRate,
+                timestamp: Date.now(),
+              };
+
+              onVadUtteranceCompleteRef.current?.({
+                blob,
+                mimeType: 'audio/wav',
+                durationSeconds,
+              });
+
+              // Safely stop any background fallback MediaRecorder without triggering duplicate emission
+              const recorder = mediaRecorderRef.current;
+              if (recorder && recorder.state !== 'inactive') {
+                isDiscardRestartRef.current = true;
+                try {
+                  recorder.stop();
+                } catch {
+                  // Ignore
+                }
+              }
+
+              // Keep VAD RAF sampling loop alive in paused state for multi-turn listening and barge-in monitoring
+              if (isHandsFreeModeRef.current && mediaStreamRef.current) {
+                vadRafIdRef.current = requestAnimationFrame(sampleMicFrame);
+              }
+              return;
+            }
+          }
 
           const recorder = mediaRecorderRef.current;
           if (recorder && recorder.state !== 'inactive') {
@@ -706,6 +882,8 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
     isVadPausedRef.current = false;
     setIsRecording(false);
     setElapsedSeconds(0);
+    isCollectingPcmRef.current = false;
+    pcmCollectorRef.current = [];
     startHandsFreeRecorderSegment();
   }, [startHandsFreeRecorderSegment]);
 
@@ -756,6 +934,9 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
         isVadPausedRef.current = false;
         setIsRecording(false);
         setElapsedSeconds(0);
+        ringBufferRef.current?.clear();
+        pcmCollectorRef.current = [];
+        isCollectingPcmRef.current = false;
         startHandsFreeRecorderSegment();
       };
 
@@ -988,5 +1169,6 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions = {}) {
     startRecording,
     stopAndSubmitRecording,
     cancelRecording,
+    getLastAudioDiagnostics: () => lastAudioDiagnosticsRef.current,
   };
 }

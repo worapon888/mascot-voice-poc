@@ -54,6 +54,13 @@ export function VoiceChat() {
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const [hasRetryPayload, setHasRetryPayload] = useState<boolean>(false);
   const [showDetails, setShowDetails] = useState<boolean>(false);
+  const [lastDiagnostics, setLastDiagnostics] = useState<{
+    source: string;
+    mimeType: string;
+    byteSize: number;
+    durationSeconds: number;
+    audioUrl?: string;
+  } | null>(null);
 
   const turnIdRef = useRef<number>(0);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -98,6 +105,27 @@ export function VoiceChat() {
       abortControllerRef.current = controller;
 
       lastRecordingRef.current = recordingPayload;
+      if (typeof window !== 'undefined') {
+        try {
+          const previewUrl = URL.createObjectURL(recordingPayload.blob);
+          setLastDiagnostics((prev) => {
+            if (prev?.audioUrl) {
+              URL.revokeObjectURL(prev.audioUrl);
+            }
+            return {
+              source: recordingPayload.mimeType.includes('wav')
+                ? 'Hands-Free (Web Audio 16kHz PCM WAV)'
+                : 'Push-to-Talk (MediaRecorder)',
+              mimeType: recordingPayload.mimeType,
+              byteSize: recordingPayload.blob.size,
+              durationSeconds: recordingPayload.durationSeconds,
+              audioUrl: previewUrl,
+            };
+          });
+        } catch {
+          // Ignore preview creation error
+        }
+      }
       if (
         !isRetry ||
         !retrySessionRef.current ||
@@ -448,6 +476,12 @@ export function VoiceChat() {
       isHandsFreeActiveRef.current = false;
       abortActiveRequest();
       stopAudio(true);
+      setLastDiagnostics((prev) => {
+        if (prev?.audioUrl) {
+          URL.revokeObjectURL(prev.audioUrl);
+        }
+        return null;
+      });
     };
   }, [abortActiveRequest, stopAudio]);
 
@@ -801,6 +835,7 @@ export function VoiceChat() {
           canRetry={voiceState === 'error' && hasRetryPayload}
           onRetry={handleRetry}
           expanded={showDetails}
+          diagnostics={showDetails ? lastDiagnostics : null}
         />
       </div>
     </section>
