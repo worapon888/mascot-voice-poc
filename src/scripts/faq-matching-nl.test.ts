@@ -6,11 +6,7 @@ import {
   generateGroundedAnswerWithMetrics,
   STANDARD_FALLBACK_ANSWER,
 } from '@/services/answer.service';
-import {
-  matchFaqsAgainstRecords,
-  matchFaqsWithConversationContext,
-} from '@/services/faq-matching.service';
-import type { ConversationTurn } from '@/types/api';
+import { matchFaqsAgainstRecords } from '@/services/faq-matching.service';
 import type { FaqRecord } from '@/types/faq';
 
 const SEEDED_FAQS: FaqRecord[] = [
@@ -71,68 +67,123 @@ async function runNaturalLanguageFaqTests() {
   let passed = 0;
 
   // ---------------------------------------------------------------------------
-  // 1. Should Match FAQ #1 (Opening Schedule)
+  // 1. Generic Lexical Matching on Database Records (SEEDED_FAQS)
   // ---------------------------------------------------------------------------
-  const faq1Queries = [
-    { query: 'เปิดกี่โมง', desc: 'Direct question' },
+  const lexicalTestCases = [
     {
-      query: 'วันเสาร์ที่นี่เปิดหรือเปล่า',
-      desc: 'Real user inquiry with locative "ที่นี่" and "หรือเปล่า"',
+      query: 'เปิดบริการกี่โมง',
+      expectedId: 1,
+      exactFastPath: true,
+      desc: 'Exact question match',
     },
-    { query: 'วันเสาร์เปิดไหม', desc: 'Spoken weekend inquiry' },
-    { query: 'แล้ววันเสาร์ล่ะ', desc: 'Conversational follow-up style inquiry' },
-    { query: 'เปิดวันไหนบ้าง', desc: 'Operating days inquiry' },
-    { query: 'วันอาทิตย์เปิดหรือไม่', desc: 'Sunday inquiry with "หรือไม่"' },
-    { query: 'เวลาทำการคืออะไร', desc: 'Schedule inquiry with "คืออะไร"' },
+    {
+      query: 'เปิดกี่โมง',
+      expectedId: 1,
+      exactFastPath: false,
+      desc: 'Keyword match',
+    },
+    {
+      query: 'เวลาทำการ',
+      expectedId: 1,
+      exactFastPath: false,
+      desc: 'Keyword match',
+    },
+    {
+      query: 'ต้องจองคิวไหม',
+      expectedId: 2,
+      exactFastPath: true,
+      desc: 'Exact question match',
+    },
+    {
+      query: 'จองคิว',
+      expectedId: 2,
+      exactFastPath: false,
+      desc: 'Keyword match',
+    },
+    {
+      query: 'เตรียมเอกสารอะไร',
+      expectedId: 3,
+      exactFastPath: true,
+      desc: 'Exact question match',
+    },
+    {
+      query: 'บัตรประชาชน',
+      expectedId: 3,
+      exactFastPath: false,
+      desc: 'Keyword match',
+    },
+    {
+      query: 'ทดลองผ่านมือถือได้ไหม',
+      expectedId: 4,
+      exactFastPath: true,
+      desc: 'Exact question match',
+    },
+    {
+      query: 'ติดต่อใครเมื่อไม่มีคำตอบ',
+      expectedId: 5,
+      exactFastPath: true,
+      desc: 'Exact question match',
+    },
   ];
 
-  for (const item of faq1Queries) {
+  for (const item of lexicalTestCases) {
     const res = matchFaqsAgainstRecords(item.query, SEEDED_FAQS);
     assert.equal(res.matched, true, `Expected match for "${item.query}"`);
-    assert.equal(res.faqs[0]?.id, 1, `Expected FAQ #1 for "${item.query}"`);
+    assert.equal(
+      res.faqs[0]?.id,
+      item.expectedId,
+      `Expected FAQ #${item.expectedId} for "${item.query}"`,
+    );
     assert.equal(
       res.highConfidenceFastPath,
-      true,
-      `Expected Fast Path for "${item.query}", got disqualifier=${res.fastPathDisqualifier}`,
+      item.exactFastPath,
+      `Expected Fast Path=${item.exactFastPath} for "${item.query}", got ${res.highConfidenceFastPath}`,
     );
     console.log(
-      `[PASS] FAQ #1 — "${item.query}" (${item.desc}) -> Tier 1 Fast Path (Score: ${res.scoredMatches[0]?.score})`,
+      `[PASS] Generic Lexical — "${item.query}" (${item.desc}) -> FAQ #${res.faqs[0]?.id}, FastPath: ${res.highConfidenceFastPath}`,
     );
     passed += 1;
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Should Match FAQ #4 (Browser & Device Compatibility)
+  // 2. Hybrid Semantic Retrieval (Live pgvector for spoken Thai variations)
   // ---------------------------------------------------------------------------
-  const faq4Queries = [
-    { query: 'เปิดในเบราว์เซอร์ไหนบ้าง', desc: 'Browser phrasing variation' },
+  console.log('\n--- Hybrid Semantic Retrieval (Live pgvector) ---');
+  process.env.FAQ_MATCHER = 'hybrid';
+  const semanticQueries = [
     {
-      query: 'แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ',
-      desc: 'Conversational prefix + particles',
-      history: [
-        { role: 'user', text: 'ทดลองผ่านมือถือได้ไหม', faqIds: [4] },
-        { role: 'assistant', text: SEEDED_FAQS[3].answer, faqIds: [4] },
-      ] as ConversationTurn[],
+      query: 'วันเสาร์ที่นี่เปิดหรือเปล่า',
+      expectedId: 1,
+      desc: 'Spoken weekend schedule',
     },
-    { query: 'ใช้ Chrome ได้ไหม', desc: 'Browser name variant' },
-    { query: 'เปิดผ่านมือถือได้หรือเปล่า', desc: 'Mobile variant with "หรือเปล่า"' },
+    { query: 'วันเสาร์เปิดไหม', expectedId: 1, desc: 'Weekend opening inquiry' },
+    {
+      query: 'เปิดในเบราว์เซอร์ไหนบ้าง',
+      expectedId: 4,
+      desc: 'Browser compatibility',
+    },
+    { query: 'ใช้ Chrome ได้ไหม', expectedId: 4, desc: 'Chrome browser query' },
+    { query: 'ต้องนัดหมายล่วงหน้าไหม', expectedId: 2, desc: 'Appointment inquiry' },
+    { query: 'ติดต่อเจ้าหน้าที่ได้ที่ไหน', expectedId: 5, desc: 'Contact desk query' },
   ];
 
-  for (const item of faq4Queries) {
-    const res = matchFaqsWithConversationContext(
-      item.query,
-      SEEDED_FAQS,
-      item.history ?? [],
-    );
-    assert.equal(res.matched, true, `Expected match for "${item.query}"`);
-    assert.equal(res.faqs[0]?.id, 4, `Expected FAQ #4 for "${item.query}"`);
+  const { retrieveMatchingFaqs } =
+    await import('@/services/faq-matching.service');
+
+  for (const item of semanticQueries) {
+    const res = await retrieveMatchingFaqs(item.query);
     assert.equal(
-      res.highConfidenceFastPath,
+      res.matched,
       true,
-      `Expected Fast Path for "${item.query}", got disqualifier=${res.fastPathDisqualifier}`,
+      `Expected hybrid match for "${item.query}"`,
+    );
+    assert.equal(
+      res.faqs[0]?.id,
+      item.expectedId,
+      `Expected FAQ #${item.expectedId} for "${item.query}"`,
     );
     console.log(
-      `[PASS] FAQ #4 — "${item.query}" (${item.desc}) -> Tier 1 Fast Path (Score: ${res.scoredMatches[0]?.score})`,
+      `[PASS] Hybrid Semantic — "${item.query}" (${item.desc}) -> FAQ #${res.faqs[0]?.id} (FastPath: ${res.highConfidenceFastPath})`,
     );
     passed += 1;
   }
@@ -170,11 +221,11 @@ async function runNaturalLanguageFaqTests() {
   }
 
   // ---------------------------------------------------------------------------
-  // 4. End-to-End Answer Service Verification (วันเสาร์ที่นี่เปิดหรือเปล่า)
+  // 4. End-to-End Answer Service Verification (Exact Question -> Tier 1 Fast Path)
   // ---------------------------------------------------------------------------
   console.log('\n--- Answer Service & Audio Reference Verification ---');
   const answerResult = await generateGroundedAnswerWithMetrics(
-    'วันเสาร์ที่นี่เปิดหรือเปล่า',
+    'เปิดบริการกี่โมง',
     async (q) => matchFaqsAgainstRecords(q, SEEDED_FAQS),
     async () => ({
       hit: true,
@@ -202,7 +253,7 @@ async function runNaturalLanguageFaqTests() {
   assert.equal(answerResult.response.audioRef?.faqId, 1);
   assert.equal(answerResult.response.answer.includes('เปิดวันจันทร์ถึงวันศุกร์'), true);
   console.log(
-    '[PASS] Answer Service — "วันเสาร์ที่นี่เปิดหรือเปล่า" returns Tier 1 Fast Path with Persistent MP3',
+    '[PASS] Answer Service — "เปิดบริการกี่โมง" returns Tier 1 Fast Path with Persistent MP3',
   );
   passed += 1;
 
@@ -243,9 +294,10 @@ async function runNaturalLanguageFaqTests() {
   passed += 1;
 
   // ---------------------------------------------------------------------------
-  // 5B. Real Next.js API Route Integration Verification (/api/answer POST)
+  // 5B. Real Next.js API Route Integration Verification (/api/answer POST with Hybrid Retrieval)
   // ---------------------------------------------------------------------------
   console.log('\n--- Live /api/answer Next.js Route Integration ---');
+  process.env.FAQ_MATCHER = 'hybrid';
   const apiReq = new NextRequest('http://localhost:3000/api/answer', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

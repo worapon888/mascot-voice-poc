@@ -29,12 +29,12 @@ export const NO_MATCH_FALLBACK_ANSWER = STANDARD_FALLBACK_ANSWER;
  * Conservative bounded context limit (in characters) for up to 3 matched FAQs.
  * Ensures total prompt input remains strictly bounded (< ~800 tokens) without external tokenizer overhead.
  */
-const MAX_FAQ_CONTEXT_CHARS = 1_500;
-const MAX_CONVERSATION_CONTEXT_CHARS = 1_000;
-const MAX_CONVERSATION_TURNS = 4;
-const MAX_LLM_OUTPUT_TOKENS = 220;
-const THAI_TEXT_REGEX = /[\u0E00-\u0E7F]/;
-const TRAILING_POLITE_PARTICLE_REGEX = /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)$/u;
+export const MAX_FAQ_CONTEXT_CHARS = 1_500;
+export const MAX_CONVERSATION_CONTEXT_CHARS = 1_000;
+export const MAX_CONVERSATION_TURNS = 4;
+export const MAX_LLM_OUTPUT_TOKENS = 220;
+export const THAI_TEXT_REGEX = /[\u0E00-\u0E7F]/;
+export const TRAILING_POLITE_PARTICLE_REGEX = /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)$/u;
 
 export interface GroundedAnswerGenerationMetrics {
   faqRetrievalLatencyMs: number;
@@ -68,7 +68,7 @@ export function formatCanonicalFaqAnswer(rawFaqAnswer: string): string {
   return `${trimmed} ครับ`.slice(0, MAX_TEXT_CHARS).trim();
 }
 
-const GROUNDED_FAQ_SYSTEM_INSTRUCTIONS = `คุณเป็นผู้ช่วยมาสคอต AI ภาษาไทยของระบบสาธิตบริการภาครัฐ (Demo)
+export const GROUNDED_FAQ_SYSTEM_INSTRUCTIONS = `คุณเป็นผู้ช่วยมาสคอต AI ภาษาไทยของระบบสาธิตบริการภาครัฐ (Demo)
 กฎเหล็กที่ต้องปฏิบัติตามอย่างเคร่งครัด:
 1. ตอบเป็นภาษาไทยที่สุภาพ เป็นมิตร กระชับ และเป็นธรรมชาติ เหมาะสำหรับอ่านออกเสียง (ความยาว 1–3 ประโยคสั้น ๆ ไม่เกิน 300 ตัวอักษร)
 2. ใช้เฉพาะข้อมูลข้อเท็จจริงที่อยู่ใน <faq_evidence> เท่านั้นในการตอบคำถาม และต้องคงรายละเอียดสำคัญ (เช่น เวลาทำการ 09:00–16:00 น. รหัสอ้างอิง ชื่อเบราว์เซอร์ หรือข้อความสำคัญในคำตอบ) ให้ครบถ้วนตรงตาม <faq_evidence> (เช่น หากถามว่าปิดกี่โมง และใน <faq_evidence> ระบุเปิด 09:00–16:00 น. ให้ตอบว่าปิดเวลา 16:00 น. โดยเปิดทำการวันจันทร์–ศุกร์ เวลา 09:00–16:00 น. ครับ)
@@ -78,7 +78,7 @@ const GROUNDED_FAQ_SYSTEM_INSTRUCTIONS = `คุณเป็นผู้ช่�
 6. หากคำถามกำกวมและตรงกับหลายหัวข้อใน <faq_evidence> ให้สรุปเฉพาะข้อมูลที่เกี่ยวข้องสั้น ๆ และถามทวนเพื่อความชัดเจน
 7. หากข้อมูลใน <faq_evidence> ไม่สามารถใช้ตอบคำถามใน <user_question> ได้เลย ให้ตอบว่า "${NO_MATCH_FALLBACK_ANSWER}"`;
 
-const GUARDED_FALLBACK_SYSTEM_INSTRUCTIONS = `คุณเป็นผู้ช่วยมาสคอต AI ประชาสัมพันธ์ภาษาไทยสำหรับระบบสาธิตบริการภาครัฐ (Government-Service Demo Information Assistant)
+export const GUARDED_FALLBACK_SYSTEM_INSTRUCTIONS = `คุณเป็นผู้ช่วยมาสคอต AI ประชาสัมพันธ์ภาษาไทยสำหรับระบบสาธิตบริการภาครัฐ (Government-Service Demo Information Assistant)
 ขณะนี้คำถามของผู้ใช้ไม่ตรงกับฐานข้อมูล FAQ สาธิตที่มีอยู่ คุณจึง "ไม่มีข้อมูลภายในเฉพาะของหน่วยงาน อาคารสถานที่ อัตราค่าบริการ หรือรายชื่อเจ้าหน้าที่ของสถานที่นี้"
 
 หน้าที่ของคุณคือวิเคราะห์คำถามใน <user_question> แล้วสร้างคำตอบภาษาไทยที่สุภาพ เป็นธรรมชาติ ช่วยเหลือผู้ใช้อย่างเหมาะสม (1–3 ประโยคสั้น ๆ ไม่เกิน 300 ตัวอักษร เหมาะสำหรับอ่านออกเสียง TTS) พร้อมจำแนกประเภทคำตอบ (answerMode) เป็นค่าใดค่าหนึ่งต่อไปนี้อย่างแม่นยำ:
@@ -108,7 +108,7 @@ const GuardedFallbackOutputSchema = z.object({
 /**
  * Patterns that indicate fabricated organization-specific numbers/facts in an unmatched answer.
  */
-const FABRICATED_CLAIM_PATTERNS: RegExp[] = [
+export const FABRICATED_CLAIM_PATTERNS: RegExp[] = [
   /ชั้น\s*[0-9๑-๙]+/u,
   /ชั้นที่\s*[0-9๑-๙]+/u,
   /[0-9๑-๙]+\s*บาท/u,

@@ -6,6 +6,7 @@ import {
 import {
   matchFaqsAgainstRecords,
   matchFaqsWithConversationContext,
+  retrieveMatchingFaqs,
 } from '@/services/faq-matching.service';
 import { executeSmartPipelineStages } from '@/lib/voice/api-client';
 import type { ConversationTurn } from '@/types/api';
@@ -69,11 +70,11 @@ async function runTests(): Promise<void> {
   let passed = 0;
 
   // ---------------------------------------------------------------------------
-  // 1. Tier 1: "เปิดกี่โมง" -> FAQ #1 (Fast Path, 0 LLM, 0 Dynamic TTS)
+  // 1. Tier 1: "เปิดบริการกี่โมง" -> FAQ #1 (Fast Path, 0 LLM, 0 Dynamic TTS)
   // ---------------------------------------------------------------------------
   {
     const res = await generateGroundedAnswerWithMetrics(
-      'เปิดกี่โมง',
+      'เปิดบริการกี่โมงครับ',
       async (q) => matchFaqsAgainstRecords(q, SEEDED_FAQS),
       async () => ({
         hit: true,
@@ -100,7 +101,7 @@ async function runTests(): Promise<void> {
     assert.notEqual(res.response.audioRef, undefined);
     assert.equal(res.response.audioRef?.faqId, 1);
     console.log(
-      '[PASS] R01 — "เปิดกี่โมง" -> Tier 1 (FAQ #1 Fast Path, 0 LLM, Persistent Audio HIT)',
+      '[PASS] R01 — "เปิดบริการกี่โมง" -> Tier 1 (FAQ #1 Fast Path, 0 LLM, Persistent Audio HIT)',
     );
     passed += 1;
   }
@@ -143,12 +144,13 @@ async function runTests(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Tier 1: "วันเสาร์เปิดไหม" -> Matches FAQ #1 Approved Alias (Option A Fast Path)
+  // 3. Tier 1: "วันเสาร์เปิดไหม" -> Matches FAQ #1 via Hybrid Semantic Retrieval
   // ---------------------------------------------------------------------------
   {
+    process.env.FAQ_MATCHER = 'hybrid';
     const res = await generateGroundedAnswerWithMetrics(
       'วันเสาร์เปิดไหมครับ',
-      async (q) => matchFaqsAgainstRecords(q, SEEDED_FAQS),
+      async (q, hist) => retrieveMatchingFaqs(q, hist),
       async () => ({
         hit: true,
         reason: 'READY_VERIFIED',
@@ -172,7 +174,7 @@ async function runTests(): Promise<void> {
     assert.equal(res.metrics.fastPathBypassedLlm, true);
     assert.equal(res.metrics.persistentAudioStatus, 'HIT');
     console.log(
-      '[PASS] R03 — "วันเสาร์เปิดไหม" -> Tier 1 (Matches FAQ #1 Approved Alias, Fast Path)',
+      '[PASS] R03 — "วันเสาร์เปิดไหม" -> Tier 1 (Matches FAQ #1 via Hybrid Semantic Search, Fast Path)',
     );
     passed += 1;
   }
@@ -181,6 +183,7 @@ async function runTests(): Promise<void> {
   // 4. Tier 1: Contextual Follow-up on FAQ #4 ("แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ")
   // ---------------------------------------------------------------------------
   {
+    process.env.FAQ_MATCHER = 'hybrid';
     const history: ConversationTurn[] = [
       { role: 'user', text: 'เปิดผ่านมือถือได้ไหม' },
       {
@@ -192,7 +195,7 @@ async function runTests(): Promise<void> {
 
     const res = await generateGroundedAnswerWithMetrics(
       'แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ',
-      async (q, hist) => matchFaqsWithConversationContext(q, SEEDED_FAQS, hist),
+      async (q, hist) => retrieveMatchingFaqs(q, hist),
       async () => ({
         hit: true,
         reason: 'READY_VERIFIED',
@@ -454,7 +457,7 @@ async function runTests(): Promise<void> {
 
     const mockStt = async (): Promise<{ transcript: string }> => {
       await new Promise((r) => setTimeout(r, SIMULATED_STT_MS));
-      return { transcript: 'เปิดกี่โมง' };
+      return { transcript: 'เปิดบริการกี่โมง' };
     };
 
     // Tier 1 Measurement
@@ -470,7 +473,7 @@ async function runTests(): Promise<void> {
       sttFn: mockStt,
       answerFn: async () => {
         const { response } = await generateGroundedAnswerWithMetrics(
-          'เปิดกี่โมง',
+          'เปิดบริการกี่โมง',
           async (q) => matchFaqsAgainstRecords(q, SEEDED_FAQS),
           async () => ({
             hit: true,
@@ -561,7 +564,7 @@ async function runTests(): Promise<void> {
       sttFn: mockStt,
       answerFn: async () => {
         const { response } = await generateGroundedAnswerWithMetrics(
-          'วันเสาร์เปิดไหม',
+          'เปิดกี่โมง',
           async (q) => matchFaqsAgainstRecords(q, SEEDED_FAQS),
           async () => ({
             hit: false,

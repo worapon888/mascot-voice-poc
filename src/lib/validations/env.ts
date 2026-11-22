@@ -30,6 +30,35 @@ export function getSupabaseEnv(): SupabaseEnv {
 }
 
 /**
+ * Feature flag for FAQ Matching Engine:
+ * - 'legacy': uses existing heuristic matching engine (default, safe for regression prevention)
+ * - 'hybrid': uses Supabase pgvector + lexical BM25 + RRF hybrid retrieval
+ * - 'shadow': runs legacy as primary responder, runs hybrid asynchronously to log comparison telemetry
+ */
+export type FaqMatcherMode = 'legacy' | 'hybrid' | 'shadow';
+
+export function getFaqMatcherMode(): FaqMatcherMode {
+  const raw = process.env.FAQ_MATCHER?.trim().toLowerCase();
+  if (raw === 'hybrid') {
+    return 'hybrid';
+  }
+  if (raw === 'shadow') {
+    return 'shadow';
+  }
+  return 'legacy';
+}
+
+/**
+ * Feature flag for Tier 2 Realtime Voice Streaming:
+ * - false (default): Uses existing sequential pipeline (Answer JSON -> TTS MP3 -> Playback)
+ * - true: Uses progressive streaming pipeline (LLM Token Stream -> Validated Sentence -> TTS Chunk -> Audio Queue)
+ */
+export function isTier2StreamingEnabled(): boolean {
+  const raw = process.env.TIER2_STREAMING_ENABLED?.trim().toLowerCase();
+  return raw === 'true' || raw === '1';
+}
+
+/**
  * Checks whether paid demo API endpoints are enabled.
  * - In development/test: enabled by default unless DEMO_ENABLED is explicitly 'false' or '0'.
  * - In production: disabled by default unless DEMO_ENABLED is explicitly 'true' or '1'.

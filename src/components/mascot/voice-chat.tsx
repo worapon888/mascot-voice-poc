@@ -4,7 +4,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ConversationPanel } from '@/components/mascot/conversation-panel';
 import { MascotAvatar } from '@/components/mascot/mascot-avatar';
 import { MicrophoneButton } from '@/components/mascot/microphone-button';
-import { useAudioLipsync } from '@/hooks/use-audio-lipsync';
+import {
+  type AudioQueueController,
+  useAudioLipsync,
+} from '@/hooks/use-audio-lipsync';
 import {
   type RecordedAudioPayload,
   useVoiceRecorder,
@@ -14,6 +17,9 @@ import {
   ClientVoiceError,
   executeSmartPipelineStages,
   preloadPersistentFaqAudios,
+  requestPersistentAudioBlob,
+  requestSpeechToText,
+  requestStreamingGroundedAnswer,
   type RetrySessionSnapshot,
 } from '@/lib/voice/api-client';
 import { evaluateKioskAutoStart } from '@/lib/voice/vad-engine';
@@ -89,6 +95,7 @@ export function VoiceChat() {
     amplitude,
     unlockAudioContext,
     playAudioBlob,
+    playAudioQueue,
     stopAudio,
   } = useAudioLipsync();
 
@@ -152,6 +159,152 @@ export function VoiceChat() {
       pendingAudioBlobRef.current = null;
       setAutoplayBlocked(false);
       setErrorMessage(null);
+
+      const streamingEnabled =
+        process.env.NEXT_PUBLIC_TIER2_STREAMING_ENABLED?.trim().toLowerCase() ===
+        'true';
+
+      if (streamingEnabled && !isRetry) {
+        try {
+          setVoiceState('transcribing');
+          const sttRes = await requestSpeechToText(
+            recordingPayload.blob,
+            recordingPayload.mimeType,
+            controller.signal,
+          );
+          if (currentTurnId !== turnIdRef.current) return;
+
+          setTranscript(sttRes.transcript);
+          setVoiceState('thinking');
+
+          const queueHolder: { current: AudioQueueController | null } = {
+            current: null,
+          };
+          let turnAnswer = '';
+          let turnTier: 'TIER_1' | 'TIER_2' | 'TIER_3' = 'TIER_2';
+          let turnFaqIds: number[] = [];
+          let isTurnMatched = false;
+
+          await requestStreamingGroundedAnswer(
+            sttRes.transcript,
+            {
+              onTier: async (tierData) => {
+                if (currentTurnId !== turnIdRef.current) return;
+                turnTier = tierData.tier;
+                isTurnMatched = tierData.matched;
+                turnFaqIds = tierData.faqIds;
+                setMatched(tierData.matched);
+                setMatchedFaqIds(tierData.faqIds);
+                setAnswerMode(
+                  tierData.tier === 'TIER_1'
+                    ? 'FAQ_GROUNDED'
+                    : tierData.tier === 'TIER_3'
+                      ? 'ORGANIZATION_INFO_UNKNOWN'
+                      : 'FAQ_GROUNDED',
+                );
+
+                if (
+                  (tierData.tier === 'TIER_1' || tierData.tier === 'TIER_3') &&
+                  tierData.audioUrl
+                ) {
+                  try {
+                    const audioBlob = await requestPersistentAudioBlob(
+                      tierData.audioUrl,
+                      controller.signal,
+                    );
+                    if (currentTurnId !== turnIdRef.current) return;
+                    if (tierData.answer) {
+                      turnAnswer = tierData.answer;
+                      setAnswer(tierData.answer);
+                    }
+                    setVoiceState('speaking');
+                    if (isHandsFreeActiveRef.current) {
+                      startHandsFreeBargeInFnRef.current();
+                    }
+                    await playAudioBlob(audioBlob);
+                  } catch {
+                    // Fall back
+                  }
+                }
+              },
+              onTextDelta: (_delta, accumulated) => {
+                if (currentTurnId !== turnIdRef.current) return;
+                turnAnswer = accumulated;
+                setAnswer(accumulated);
+              },
+              onAudioChunk: (chunkData) => {
+                if (currentTurnId !== turnIdRef.current) return;
+                if (!queueHolder.current) {
+                  setVoiceState('speaking');
+                  if (isHandsFreeActiveRef.current) {
+                    startHandsFreeBargeInFnRef.current();
+                  }
+                  queueHolder.current = playAudioQueue();
+                }
+                queueHolder.current.enqueueChunk(
+                  chunkData.blob,
+                  chunkData.isLast,
+                );
+              },
+              onDone: (doneData) => {
+                if (currentTurnId !== turnIdRef.current) return;
+                turnAnswer = doneData.fullAnswer;
+                setAnswer(doneData.fullAnswer);
+                if (queueHolder.current) {
+                  queueHolder.current.markComplete();
+                }
+              },
+            },
+            controller.signal,
+            conversationHistoryRef.current,
+          );
+
+          if (currentTurnId !== turnIdRef.current) return;
+
+          if (queueHolder.current) {
+            await queueHolder.current.promise;
+          }
+
+          if (turnAnswer) {
+            conversationHistoryRef.current = appendCompletedTurnToHistory(
+              conversationHistoryRef.current,
+              sttRes.transcript,
+              {
+                answer: turnAnswer,
+                faqIds: turnFaqIds,
+                matched: isTurnMatched,
+                tier: turnTier,
+              },
+            );
+          }
+
+          if (isHandsFreeActiveRef.current) {
+            setVoiceState('listening');
+            resumeHandsFreeFnRef.current(true);
+          } else {
+            setVoiceState('idle');
+          }
+          return;
+        } catch (streamingErr) {
+          if (currentTurnId !== turnIdRef.current) return;
+          if (
+            streamingErr instanceof Error &&
+            streamingErr.name === 'AbortError'
+          ) {
+            if (isHandsFreeActiveRef.current) {
+              setVoiceState('listening');
+              resumeHandsFreeFnRef.current(false);
+            } else {
+              setVoiceState('idle');
+            }
+            return;
+          }
+          console.warn(
+            '[VoiceChat] Streaming pipeline encountered error, falling back to sequential execution:',
+            streamingErr,
+          );
+        }
+      }
 
       try {
         const stageResult = await executeSmartPipelineStages({
@@ -316,7 +469,7 @@ export function VoiceChat() {
         }
       }
     },
-    [abortActiveRequest, playAudioBlob, stopAudio],
+    [abortActiveRequest, playAudioBlob, playAudioQueue, stopAudio],
   );
 
   const handleRecorderError = useCallback(

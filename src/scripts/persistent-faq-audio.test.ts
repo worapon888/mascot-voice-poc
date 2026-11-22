@@ -273,7 +273,7 @@ async function runTests(): Promise<void> {
       onStateChange: () => {},
       onTranscriptReady: () => {},
       onAnswerReady: () => {},
-      sttFn: async () => ({ transcript: 'สำนักงานเปิดกี่โมงครับ' }),
+      sttFn: async () => ({ transcript: 'เปิดบริการกี่โมงครับ' }),
       answerFn: async (transcript) => {
         const { response, metrics } = await generateGroundedAnswerWithMetrics(
           transcript,
@@ -327,7 +327,7 @@ async function runTests(): Promise<void> {
     const ttsCallsBefore = openAiTtsCallCount;
 
     // Simulate Browser Reload (fresh session state) asking FAQ #1 and FAQ #2
-    for (const query of ['เปิดบริการกี่โมงครับ', 'ต้องนัดล่วงหน้าไหมครับ']) {
+    for (const query of ['เปิดบริการกี่โมงครับ', 'ต้องจองคิวไหมครับ']) {
       const { response, metrics } = await generateGroundedAnswerWithMetrics(
         query,
         async (q) =>

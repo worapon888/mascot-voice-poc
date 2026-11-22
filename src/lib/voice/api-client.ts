@@ -9,6 +9,45 @@ export const MAX_BROWSER_AUDIO_BYTES = 3 * 1024 * 1024; // 3 MB
 export const MAX_RECORDING_SECONDS = 20;
 export const MAX_CLIENT_CONVERSATION_HISTORY_TURNS = 4;
 
+export interface StreamingAnswerCallbacks {
+  onTier?: (data: {
+    tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
+    matched: boolean;
+    faqIds: number[];
+    answer?: string;
+    audioUrl?: string;
+  }) => void;
+  onTextDelta?: (delta: string, accumulated: string) => void;
+  onAudioChunk?: (data: {
+    chunkIndex: number;
+    text: string;
+    blob: Blob;
+    cached: boolean;
+    isLast: boolean;
+  }) => void;
+  onDone?: (data: {
+    tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
+    fullAnswer: string;
+    totalChunks: number;
+  }) => void;
+}
+
+export function base64ToBlob(
+  base64DataUri: string,
+  mimeType = 'audio/mpeg',
+): Blob {
+  const base64 = base64DataUri.includes(',')
+    ? base64DataUri.split(',')[1]
+    : base64DataUri;
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
 /**
  * Pure helper that appends a completed user + assistant exchange to the client session's
  * sliding conversation window (capped at `maxTurns`, default 4 turns).
@@ -263,6 +302,141 @@ export async function requestGroundedAnswer(
   }
 
   return (await response.json()) as AnswerResponse;
+}
+
+/**
+ * Sends transcript to POST /api/answer/stream and processes Server-Sent Events (SSE)
+ * progressively yielding text deltas, tier identification, and ready-to-play audio chunks.
+ */
+export async function requestStreamingGroundedAnswer(
+  transcript: string,
+  callbacks: StreamingAnswerCallbacks,
+  signal?: AbortSignal,
+  conversationHistory?: ReadonlyArray<ConversationTurn>,
+): Promise<void> {
+  const payload =
+    conversationHistory && conversationHistory.length > 0
+      ? {
+          transcript,
+          conversationHistory: conversationHistory.slice(
+            -MAX_CLIENT_CONVERSATION_HISTORY_TURNS,
+          ),
+        }
+      : { transcript };
+
+  let response: Response;
+  try {
+    response = await fetch('/api/answer/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw err;
+    }
+    throw new ClientVoiceError(
+      'NETWORK_ERROR',
+      0,
+      'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์สตรีมคำตอบได้',
+    );
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response, 'เกิดข้อผิดพลาดในการรับสตรีมคำตอบ');
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new ClientVoiceError(
+      'STREAM_UNAVAILABLE',
+      500,
+      'ตัวอ่านสตรีมไม่พร้อมใช้งาน',
+    );
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      if (signal?.aborted) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() ?? '';
+
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        let eventType = 'message';
+        let dataStr = '';
+
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataStr = line.slice(5).trim();
+          }
+        }
+
+        if (!dataStr) continue;
+
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
+
+        if (eventType === 'tier') {
+          callbacks.onTier?.({
+            tier: parsed.tier as 'TIER_1' | 'TIER_2' | 'TIER_3',
+            matched: Boolean(parsed.matched),
+            faqIds: (parsed.faqIds as number[]) ?? [],
+            answer: parsed.answer as string | undefined,
+            audioUrl: parsed.audioUrl as string | undefined,
+          });
+        } else if (eventType === 'text_chunk') {
+          callbacks.onTextDelta?.(
+            parsed.delta as string,
+            parsed.accumulated as string,
+          );
+        } else if (eventType === 'audio_chunk_ready') {
+          const audioDataUri = parsed.audioDataUri as string;
+          if (audioDataUri) {
+            const blob = base64ToBlob(audioDataUri);
+            callbacks.onAudioChunk?.({
+              chunkIndex: parsed.chunkIndex as number,
+              text: parsed.text as string,
+              blob,
+              cached: Boolean(parsed.cached),
+              isLast: Boolean(parsed.isLast),
+            });
+          }
+        } else if (eventType === 'done') {
+          callbacks.onDone?.({
+            tier: parsed.tier as 'TIER_1' | 'TIER_2' | 'TIER_3',
+            fullAnswer: parsed.fullAnswer as string,
+            totalChunks: parsed.totalChunks as number,
+          });
+        } else if (eventType === 'error') {
+          throw new ClientVoiceError(
+            (parsed.code as string) ?? 'UPSTREAM_ERROR',
+            500,
+            (parsed.message as string) ?? 'ข้อผิดพลาดในการสตรีม',
+          );
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**

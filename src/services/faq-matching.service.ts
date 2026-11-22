@@ -1,5 +1,7 @@
 import 'server-only';
+import { getFaqMatcherMode } from '@/lib/validations/env';
 import { getActiveFaqs } from '@/repositories/faq.repository';
+import { executeHybridFaqRetrieval } from '@/services/hybrid-faq-retrieval.service';
 import type { ConversationTurn } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
 
@@ -170,138 +172,6 @@ export function stripLeadingConversationalPrefixes(text: string): string {
   return result;
 }
 
-/**
- * Supplemental domain phrase aliases mapped to canonical FAQ questions.
- * Complements the primary `keywords` array stored in Supabase `public.faqs`.
- */
-const SUPPLEMENTAL_ALIASES_BY_QUESTION: Record<string, string[]> = {
-  เปิดบริการกี่โมง: [
-    'เปิดวันไหน',
-    'เปิดวันไหนบ้าง',
-    'เปิดวันอะไร',
-    'เปิดทำการวันไหน',
-    'เปิดให้บริการวันไหน',
-    'ปิดกี่โมง',
-    'ปิดบริการ',
-    'ปิดบริการกี่โมง',
-    'ปิดทำการ',
-    'ปิดทำการกี่โมง',
-    'สำนักงานปิดกี่โมง',
-    'เวลาเปิด',
-    'เวลาปิด',
-    'เวลาปิดบริการ',
-    'เปิดทำการ',
-    'เปิดทำการกี่โมง',
-    'เปิดถึงกี่โมง',
-    'กี่โมงถึงกี่โมง',
-    'เวลาทำการ',
-    'วันเวลาทำการ',
-    'เวลาเปิดทำการ',
-    'เวลาเปิดบริการ',
-    'เสาร์อาทิตย์เปิดไหม',
-    'วันเสาร์เปิดไหม',
-    'วันอาทิตย์เปิดไหม',
-    'เปิดวันเสาร์ไหม',
-    'เปิดวันอาทิตย์ไหม',
-    'วันเสาร์เปิดให้บริการไหม',
-    'เสาร์อาทิตย์เปิดให้บริการไหม',
-  ],
-  ต้องจองคิวไหม: [
-    'จองล่วงหน้า',
-    'คิวนัด',
-    'รับคิว',
-    'ต้องจองไหม',
-    'นัดคิว',
-    'ต้องนัดไหม',
-    'ต้องนัดคิวไหม',
-    'ต้องนัดหมายไหม',
-    'ต้องนัดหมายล่วงหน้า',
-    'จองคิวยังไง',
-    'นัดหมายล่วงหน้า',
-    'วอล์คอิน',
-    'วอล์คอินได้ไหม',
-    'walk in',
-    'walk in ได้ไหม',
-    'เข้าไปได้เลยไหม',
-    'มาได้เลยไหม',
-  ],
-  เตรียมเอกสารอะไร: [
-    'ใช้เอกสารอะไร',
-    'ใช้เอกสารอะไรบ้าง',
-    'ต้องเตรียมอะไร',
-    'ต้องเตรียมอะไรไปบ้าง',
-    'ต้องเตรียมเอกสารอะไร',
-    'ต้องเตรียมเอกสารอะไรบ้าง',
-    'หลักฐานอะไร',
-    'พกอะไรไปบ้าง',
-    'นำอะไรไปบ้าง',
-    'เอกสารอะไรบ้าง',
-    'ต้องใช้เอกสารอะไร',
-    'ต้องใช้บัตรประชาชนไหม',
-    'ใช้บัตรประชาชนไหม',
-    'พกบัตรประชาชนไหม',
-  ],
-  ทดลองผ่านมือถือได้ไหม: [
-    'สมาร์ทโฟน',
-    'สมาร์ทโฟนใช้ได้ไหม',
-    'โทรศัพท์มือถือ',
-    'โทรศัพท์ใช้ได้ไหม',
-    'ใช้ในมือถือ',
-    'ใช้ในมือถือได้ไหม',
-    'ใช้บนมือถือได้ไหม',
-    'ใช้ผ่านมือถือได้ไหม',
-    'เปิดในมือถือ',
-    'เปิดในมือถือได้ไหม',
-    'เปิดผ่านมือถือ',
-    'เปิดผ่านมือถือได้ไหม',
-    'เปิดบนมือถือได้ไหม',
-    'รองรับมือถือ',
-    'รองรับมือถือไหม',
-    'ใช้มือถือได้ไหม',
-    'มือถือใช้ได้ไหม',
-    'มือถือเปิดได้ไหม',
-    'เข้าผ่านมือถือ',
-    'เข้าผ่านมือถือได้ไหม',
-    'เข้าในมือถือได้ไหม',
-    'ทดลองในมือถือ',
-    'ใช้งานผ่านมือถือ',
-    'เบราว์เซอร์อะไร',
-    'เบราว์เซอร์อะไรบ้าง',
-    'เบราว์เซอร์ไหน',
-    'เบราว์เซอร์ไหนบ้าง',
-    'ใช้เบราว์เซอร์อะไร',
-    'ใช้เบราว์เซอร์ไหน',
-    'ใช้เบราว์เซอร์ไหนบ้าง',
-    'เปิดในเบราว์เซอร์อะไร',
-    'เปิดในเบราว์เซอร์ไหน',
-    'เปิดในเบราว์เซอร์ไหนบ้าง',
-    'เปิดได้ในเบราว์เซอร์ไหนบ้าง',
-    'เปิดได้ในเบราว์เซอร์ไหน',
-    'เปิดบนเบราว์เซอร์ไหน',
-    'เปิดบนเบราว์เซอร์อะไร',
-    'เปิดด้วยเบราว์เซอร์อะไร',
-    'ใช้ chrome ได้ไหม',
-    'ใช้โครมได้ไหม',
-    'เปิดใน chrome ได้ไหม',
-    'เปิดบน chrome ได้ไหม',
-    'เปิดผ่าน chrome ได้ไหม',
-    'รองรับ chrome ไหม',
-    'รองรับโครมไหม',
-  ],
-  ติดต่อใครเมื่อไม่มีคำตอบ: [
-    'ติดต่อใคร',
-    'ติดต่อใครได้บ้าง',
-    'ติดต่อเจ้าหน้าที่',
-    'ติดต่อเจ้าหน้าที่ได้ที่ไหน',
-    'ผู้ดูแล',
-    'สอบถามเพิ่มเติม',
-    'สอบถามเพิ่มเติมได้ที่ไหน',
-    'ถามใครได้',
-    'สอบถามใครได้บ้าง',
-    'ติดต่อได้ที่ไหน',
-  ],
-};
-
 export interface ScoredFaqMatch {
   faq: FaqRecord;
   score: number;
@@ -334,58 +204,6 @@ export interface FaqRetrievalResult {
   fastPathDisqualifier?: FastPathDisqualifier;
   retrievalLatencyMs: number;
 }
-
-/**
- * Out-of-scope or organization-specific topics that do not exist in the demo FAQ table.
- * Any query containing these terms must NEVER bypass the LLM via Fast Path.
- */
-const OUT_OF_SCOPE_FAST_PATH_PATTERNS: readonly RegExp[] = [
-  /ห้องน้ำ/u,
-  /ส้วม/u,
-  /สุขา/u,
-  /ที่จอดรถ/u,
-  /จอดรถ/u,
-  /สูบบุหรี่/u,
-  /บุหรี่/u,
-  /ชั้น\s*[0-9๑-๙]+/u,
-  /ชั้นไหน/u,
-  /ชั้นอะไร/u,
-  /อยู่ชั้น/u,
-  /ราคา/u,
-  /ค่าเช่า/u,
-  /ค่าธรรมเนียม/u,
-  /ค่าบริการ/u,
-  /ค่าใช้จ่าย/u,
-  /กี่บาท/u,
-  /เสียเงิน/u,
-  /ฟรีไหม/u,
-  /ฟรีหรือเปล่า/u,
-  /อากาศ/u,
-  /พยากรณ์/u,
-  /ฝนตก/u,
-  /เพิกเฉย/u,
-  /คำสั่งเดิม/u,
-  /ลืม/u,
-  /ทำหาย/u,
-  /ชาร์จ/u,
-  /แบต/u,
-  /ไวไฟ/u,
-  /wifi/iu,
-  /รหัสผ่าน/u,
-  /ไปรษณีย์/u,
-  /คนไหน/u,
-  /ชื่ออะไร/u,
-  /เบอร์โทร/u,
-  /เบอร์ติดต่อ/u,
-  /แผนที่/u,
-  /เดินทางยังไง/u,
-  /ล่วงเวลา/u,
-  /ทำงานล่วงเวลา/u,
-  /นอกเวลาทำการ/u,
-  /โอที/u,
-  /บริการพิเศษ/u,
-  /สิทธิพิเศษ/u,
-];
 
 /**
  * Negation, conditional problem statements, or troubleshooting cues that require LLM reasoning
@@ -422,145 +240,6 @@ const MULTI_INTENT_CONNECTOR_PATTERNS: readonly RegExp[] = [
   /อีกเรื่อง/u,
   /อีกคำถาม/u,
 ];
-
-/**
- * Unmentioned specific time or schedule sub-angles (such as lunch break or special holiday policies)
- * where the canonical FAQ answer does not contain facts, requiring LLM handling.
- */
-const UNANSWERED_SPECIFIC_SCHEDULE_PATTERNS: readonly RegExp[] = [
-  /พักเที่ยง/u,
-  /พักกลางวัน/u,
-  /หยุดชดเชย/u,
-];
-
-/**
- * Approved high-confidence phrase aliases per canonical FAQ question that are safe
- * for direct canonical answer return when no disqualifier is present.
- * Generic single-word keywords (e.g. "มือถือ", "ติดต่อ", "เจ้าหน้าที่", "เอกสาร") are intentionally excluded.
- */
-const APPROVED_FAST_PATH_PHRASES_BY_QUESTION: Record<
-  string,
-  readonly string[]
-> = {
-  เปิดบริการกี่โมง: [
-    'เปิดบริการกี่โมง',
-    'เปิดกี่โมง',
-    'สำนักงานเปิดกี่โมง',
-    'เปิดทำการกี่โมง',
-    'เวลาทำการ',
-    'วันเวลาทำการ',
-    'เวลาเปิดบริการ',
-    'เวลาเปิดทำการ',
-    'เปิดให้บริการกี่โมง',
-    'เปิดวันไหน',
-    'เปิดวันไหนบ้าง',
-    'เปิดวันอะไร',
-    'เปิดทำการวันไหน',
-    'เปิดให้บริการวันไหน',
-    'กี่โมงถึงกี่โมง',
-    'เปิดถึงกี่โมง',
-    'ปิดกี่โมง',
-    'ปิดบริการกี่โมง',
-    'ปิดทำการกี่โมง',
-    'เวลาปิด',
-    'เวลาปิดบริการ',
-    'วันเสาร์เปิดไหม',
-    'เสาร์อาทิตย์เปิดไหม',
-    'เปิดวันเสาร์ไหม',
-    'เปิดวันอาทิตย์ไหม',
-    'วันอาทิตย์เปิดไหม',
-    'วันเสาร์เปิดให้บริการไหม',
-    'เสาร์อาทิตย์เปิดให้บริการไหม',
-  ],
-  ต้องจองคิวไหม: [
-    'ต้องจองคิวไหม',
-    'ต้องจองคิวล่วงหน้าไหม',
-    'ต้องนัดล่วงหน้า',
-    'ต้องนัดหมายล่วงหน้า',
-    'ต้องจองล่วงหน้า',
-    'ต้องจองไหม',
-    'ต้องนัดไหม',
-    'ต้องนัดคิวไหม',
-    'ต้องนัดหมายไหม',
-    'จองคิวยังไง',
-    'นัดหมายล่วงหน้า',
-    'วอล์คอิน',
-    'วอล์คอินได้ไหม',
-    'walk in',
-    'walk in ได้ไหม',
-    'เข้าไปได้เลยไหม',
-    'มาได้เลยไหม',
-  ],
-  เตรียมเอกสารอะไร: [
-    'เตรียมเอกสารอะไร',
-    'เตรียมเอกสารอะไรบ้าง',
-    'ต้องเตรียมเอกสารอะไร',
-    'ต้องเตรียมเอกสารอะไรบ้าง',
-    'ใช้เอกสารอะไร',
-    'ใช้เอกสารอะไรบ้าง',
-    'ต้องใช้เอกสารอะไร',
-    'ต้องเอาอะไรไปบ้าง',
-    'เอาอะไรไปบ้าง',
-    'พกอะไรไปบ้าง',
-    'นำอะไรไปบ้าง',
-    'ต้องใช้บัตรประชาชนไหม',
-    'ใช้บัตรประชาชนไหม',
-    'พกบัตรประชาชนไหม',
-  ],
-  ทดลองผ่านมือถือได้ไหม: [
-    'ทดลองผ่านมือถือได้ไหม',
-    'ใช้มือถือได้ไหม',
-    'ใช้ในมือถือได้ไหม',
-    'เปิดในมือถือได้ไหม',
-    'รองรับมือถือไหม',
-    'เข้าผ่านมือถือได้ไหม',
-    'เข้าในมือถือได้ไหม',
-    'ทดลองในมือถือ',
-    'ใช้งานผ่านมือถือ',
-    'เปิดผ่านมือถือได้ไหม',
-    'เปิดผ่านมือถือ',
-    'เปิดในมือถือ',
-    'ใช้ผ่านมือถือได้ไหม',
-    'ใช้บนมือถือได้ไหม',
-    'เปิดบนมือถือได้ไหม',
-    'มือถือใช้ได้ไหม',
-    'มือถือเปิดได้ไหม',
-    'โทรศัพท์ใช้ได้ไหม',
-    'สมาร์ทโฟนใช้ได้ไหม',
-    'ใช้เบราว์เซอร์อะไร',
-    'ใช้เบราว์เซอร์ไหน',
-    'ใช้เบราว์เซอร์ไหนบ้าง',
-    'เปิดในเบราว์เซอร์อะไร',
-    'เปิดในเบราว์เซอร์ไหน',
-    'เปิดในเบราว์เซอร์ไหนบ้าง',
-    'เปิดได้ในเบราว์เซอร์ไหนบ้าง',
-    'เปิดได้ในเบราว์เซอร์ไหน',
-    'เปิดบนเบราว์เซอร์ไหน',
-    'เปิดบนเบราว์เซอร์อะไร',
-    'เปิดด้วยเบราว์เซอร์อะไร',
-    'เบราว์เซอร์ไหนบ้าง',
-    'เบราว์เซอร์อะไรบ้าง',
-    'เบราว์เซอร์อะไร',
-    'ใช้ chrome ได้ไหม',
-    'ใช้โครมได้ไหม',
-    'เปิดใน chrome ได้ไหม',
-    'เปิดบน chrome ได้ไหม',
-    'เปิดผ่าน chrome ได้ไหม',
-    'รองรับ chrome ไหม',
-    'รองรับโครมไหม',
-  ],
-  ติดต่อใครเมื่อไม่มีคำตอบ: [
-    'ติดต่อใครเมื่อไม่มีคำตอบ',
-    'ถ้าไม่มีคำตอบติดต่อใคร',
-    'สอบถามเพิ่มเติมได้ที่ไหน',
-    'สอบถามข้อมูลเพิ่มเติมได้ที่ใคร',
-    'ติดต่อใครได้บ้าง',
-    'ติดต่อเจ้าหน้าที่ได้ที่ไหน',
-    'สอบถามใครได้บ้าง',
-    'ติดต่อผู้ดูแลการสาธิต',
-    'ติดต่อเจ้าหน้าที่ประชาสัมพันธ์',
-  ],
-};
 
 /**
  * Applies Unicode NFC normalization, Thai SARA AM normalization, punctuation removal,
@@ -730,41 +409,15 @@ export function scoreFaqRecord(
     }
   }
 
-  // 4. Supplemental alias/synonym phrase matching
-  const supplementalAliases =
-    SUPPLEMENTAL_ALIASES_BY_QUESTION[faq.question] ?? [];
-  for (const rawAlias of supplementalAliases) {
-    const alias = normalizeThaiText(rawAlias);
-    const aliasCore = extractQuestionCore(alias);
-    const spacelessAlias = alias.replace(/\s+/g, '');
-    const spacelessAliasCore = aliasCore.replace(/\s+/g, '');
+  // 4. Lexical matching against Supabase `answer` text
+  const normAnswer = normalizeThaiText(faq.answer);
+  if (normAnswer && politeStrippedQuery.length >= 4) {
     if (
-      alias.length >= 3 &&
-      !GENERIC_STANDALONE_WORDS.has(alias) &&
-      (politeStrippedQuery.includes(alias) ||
-        queryCore.includes(alias) ||
-        conversationalClean.includes(alias) ||
-        conversationalCore.includes(alias) ||
-        locativeStrippedQuery.includes(alias) ||
-        locativeStrippedCore.includes(alias) ||
-        spacelessPolite.includes(spacelessAlias) ||
-        spacelessLocativeQuery.includes(spacelessAlias) ||
-        spacelessConversational.includes(spacelessAlias) ||
-        (spacelessConversationalCore.length >= 4 &&
-          (spacelessAlias.includes(spacelessConversationalCore) ||
-            spacelessAliasCore.includes(spacelessConversationalCore) ||
-            spacelessConversationalCore.includes(spacelessAliasCore))) ||
-        (spacelessLocativeCore.length >= 4 &&
-          (spacelessAlias.includes(spacelessLocativeCore) ||
-            spacelessAliasCore.includes(spacelessLocativeCore) ||
-            spacelessLocativeCore.includes(spacelessAliasCore))) ||
-        (conversationalCore.length >= 4 &&
-          (alias.includes(conversationalCore) ||
-            aliasCore.includes(conversationalCore) ||
-            conversationalCore.includes(aliasCore))))
+      normAnswer.includes(politeStrippedQuery) ||
+      normAnswer.includes(queryCore)
     ) {
-      score += 25 + alias.length * 3;
-      matchedTerms.push(`alias:${alias}`);
+      score += 20;
+      matchedTerms.push('answer_overlap');
     }
   }
 
@@ -775,12 +428,8 @@ export function scoreFaqRecord(
  * Evaluates whether a single matched FAQ qualifies for the Safe High-Confidence Fast Path
  * (returning the canonical FAQ answer directly without invoking the LLM).
  *
- * Rules:
- * 1. Never decides by numeric score threshold alone.
- * 2. Requires a single unambiguous matched FAQ (`selected.length === 1 && !ambiguous`).
- * 3. Rejects queries containing out-of-scope signals, negation/troubleshooting conditions,
- *    multi-intent connectors, or reverse/weekend time angles.
- * 4. Requires either an exact canonical question match OR an approved intent phrase alias.
+ * In generic lexical mode, Fast Path is strictly reserved for unambiguous exact question matches
+ * to guarantee 100% precision without hardcoded alias dictionaries.
  */
 export function evaluateSafeFastPath(
   normalizedTranscript: string,
@@ -819,18 +468,6 @@ export function evaluateSafeFastPath(
   }
 
   if (
-    OUT_OF_SCOPE_FAST_PATH_PATTERNS.some((pattern) =>
-      pattern.test(normalizedTranscript),
-    )
-  ) {
-    return {
-      highConfidenceFastPath: false,
-      fastPathMatchReason: 'NONE',
-      fastPathDisqualifier: 'OUT_OF_SCOPE_SIGNAL',
-    };
-  }
-
-  if (
     NEGATION_OR_COMPLEX_CONDITION_PATTERNS.some((pattern) =>
       pattern.test(normalizedTranscript),
     )
@@ -855,25 +492,8 @@ export function evaluateSafeFastPath(
   }
 
   const primaryMatch = selected[0];
-  const primaryFaq = primaryMatch.faq;
-  const conversationalStripped =
-    stripLeadingConversationalPrefixes(politeStripped);
-  const locativeStripped = stripLocativeDemonstratives(conversationalStripped);
-  const conversationalClean = locativeStripped
-    .replace(/\s*(?:ล่ะ|ละ)\s*/g, ' ')
-    .trim();
-  const conversationalCore = extractQuestionCore(conversationalClean);
 
-  const locativeStrippedQuery = stripLocativeDemonstratives(politeStripped);
-  const locativeStrippedCore = extractQuestionCore(locativeStrippedQuery);
-
-  const spacelessPolite = politeStripped.replace(/\s+/g, '');
-  const spacelessLocativeQuery = locativeStrippedQuery.replace(/\s+/g, '');
-  const spacelessLocativeCore = locativeStrippedCore.replace(/\s+/g, '');
-  const spacelessConversational = conversationalClean.replace(/\s+/g, '');
-  const spacelessConversationalCore = conversationalCore.replace(/\s+/g, '');
-
-  // Check 1: Exact question match
+  // Exact question match is the only valid Fast Path in generic lexical mode
   const hasExactMatch = primaryMatch.matchedTerms.some((term) =>
     term.startsWith('exact:'),
   );
@@ -881,70 +501,6 @@ export function evaluateSafeFastPath(
     return {
       highConfidenceFastPath: true,
       fastPathMatchReason: 'EXACT_QUESTION',
-    };
-  }
-
-  // Check 2: Approved intent phrase alias match
-  const approvedPhrases =
-    APPROVED_FAST_PATH_PHRASES_BY_QUESTION[primaryFaq.question] ?? [];
-  const matchesApprovedPhrase = approvedPhrases.some((rawPhrase) => {
-    const normPhrase = stripTrailingPoliteParticles(
-      normalizeThaiText(rawPhrase),
-    );
-    const corePhrase = extractQuestionCore(normPhrase);
-    const spacelessPhrase = normPhrase.replace(/\s+/g, '');
-    const spacelessCorePhrase = corePhrase.replace(/\s+/g, '');
-    return (
-      (normPhrase.length >= 4 &&
-        (politeStripped.includes(normPhrase) ||
-          conversationalClean.includes(normPhrase) ||
-          locativeStrippedQuery.includes(normPhrase) ||
-          spacelessPolite.includes(spacelessPhrase) ||
-          spacelessLocativeQuery.includes(spacelessPhrase) ||
-          spacelessConversational.includes(spacelessPhrase))) ||
-      (corePhrase.length >= 4 &&
-        (politeStripped.includes(corePhrase) ||
-          coreQuery.includes(corePhrase) ||
-          conversationalClean.includes(corePhrase) ||
-          conversationalCore.includes(corePhrase) ||
-          locativeStrippedQuery.includes(corePhrase) ||
-          locativeStrippedCore.includes(corePhrase) ||
-          spacelessPolite.includes(spacelessCorePhrase) ||
-          spacelessLocativeQuery.includes(spacelessCorePhrase) ||
-          spacelessLocativeCore.includes(spacelessCorePhrase) ||
-          spacelessConversational.includes(spacelessCorePhrase) ||
-          spacelessConversationalCore.includes(spacelessCorePhrase))) ||
-      (conversationalCore.length >= 4 &&
-        (normPhrase.includes(conversationalCore) ||
-          corePhrase.includes(conversationalCore) ||
-          spacelessPhrase.includes(spacelessConversationalCore) ||
-          spacelessCorePhrase.includes(spacelessConversationalCore) ||
-          spacelessConversationalCore.includes(spacelessCorePhrase))) ||
-      (spacelessLocativeCore.length >= 4 &&
-        (spacelessPhrase.includes(spacelessLocativeCore) ||
-          spacelessCorePhrase.includes(spacelessLocativeCore) ||
-          spacelessLocativeCore.includes(spacelessCorePhrase)))
-    );
-  });
-
-  if (matchesApprovedPhrase) {
-    return {
-      highConfidenceFastPath: true,
-      fastPathMatchReason: 'APPROVED_INTENT_ALIAS',
-    };
-  }
-
-  // Check 3: Unanswered specific schedule angles (e.g. lunch breaks)
-  if (
-    primaryFaq.question === 'เปิดบริการกี่โมง' &&
-    UNANSWERED_SPECIFIC_SCHEDULE_PATTERNS.some((pattern) =>
-      pattern.test(normalizedTranscript),
-    )
-  ) {
-    return {
-      highConfidenceFastPath: false,
-      fastPathMatchReason: 'NONE',
-      fastPathDisqualifier: 'REVERSE_OR_SPECIFIC_TIME_ANGLE',
     };
   }
 
@@ -1107,11 +663,8 @@ export function matchFaqsWithConversationContext(
     return primary;
   }
 
-  const normalized = primary.normalizedTranscript;
-  const isOutOfScope = OUT_OF_SCOPE_FAST_PATH_PATTERNS.some((pattern) =>
-    pattern.test(normalized),
-  );
-  if (isOutOfScope) {
+  // If the query has no match at all and no follow-up signal, return primary immediately
+  if (!primary.matched && !hasContextualFollowUpSignal(rawTranscript)) {
     return primary;
   }
 
@@ -1236,17 +789,72 @@ export async function retrieveMatchingFaqs(
   rawTranscript: string,
   conversationHistory: ReadonlyArray<ConversationTurn> = [],
 ): Promise<FaqRetrievalResult> {
+  const matcherMode = getFaqMatcherMode();
+
+  // Primary execution for Hybrid Matcher mode
+  if (matcherMode === 'hybrid') {
+    try {
+      return await executeHybridFaqRetrieval(
+        rawTranscript,
+        conversationHistory,
+      );
+    } catch (err) {
+      console.warn(
+        '[FaqMatching] Hybrid retrieval failed, evaluating generic DB lexical search fallback:',
+        err instanceof Error ? err.message : err,
+      );
+      // Fallback policy (Step 3):
+      // 1. If DB is accessible, retrieve active FAQs and run generic lexical search
+      // 2. If DB is inaccessible (getActiveFaqs throws FaqRepositoryError), let it throw
+      //    so the API controller returns 503 instead of treating failure as "no FAQ".
+      const t0 = performance.now();
+      const activeFaqs = await getActiveFaqs();
+      const retrievalLatencyMs = Math.round(performance.now() - t0);
+      return matchFaqsWithConversationContext(
+        rawTranscript,
+        activeFaqs,
+        conversationHistory,
+        retrievalLatencyMs,
+      );
+    }
+  }
+
   const t0 = performance.now();
   // Query live active FAQs from Supabase (throws FaqRepositoryError on DB failure)
   const activeFaqs = await getActiveFaqs();
   const retrievalLatencyMs = Math.round(performance.now() - t0);
 
-  return matchFaqsWithConversationContext(
+  const legacyResult = matchFaqsWithConversationContext(
     rawTranscript,
     activeFaqs,
     conversationHistory,
     retrievalLatencyMs,
   );
+
+  // Shadow comparison mode: execute hybrid asynchronously in background without blocking response
+  if (matcherMode === 'shadow') {
+    void executeHybridFaqRetrieval(
+      rawTranscript,
+      conversationHistory,
+      Promise.resolve(activeFaqs),
+    )
+      .then((hybridResult) => {
+        const legacyTop = legacyResult.faqs[0]?.id ?? null;
+        const hybridTop = hybridResult.faqs[0]?.id ?? null;
+        const agree = legacyTop === hybridTop;
+        console.info(
+          `[ShadowComparison] Query: "${rawTranscript.slice(0, 40)}" | Agree: ${agree} | Legacy: #${legacyTop} (FP:${legacyResult.highConfidenceFastPath}) | Hybrid: #${hybridTop} (FP:${hybridResult.highConfidenceFastPath}) | Latency: L=${legacyResult.retrievalLatencyMs}ms, H=${hybridResult.retrievalLatencyMs}ms`,
+        );
+      })
+      .catch((shadowErr) => {
+        console.warn(
+          '[ShadowComparison] Shadow query failed:',
+          shadowErr instanceof Error ? shadowErr.message : shadowErr,
+        );
+      });
+  }
+
+  return legacyResult;
 }
 
 /**
