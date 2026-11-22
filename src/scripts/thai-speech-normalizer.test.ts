@@ -74,9 +74,10 @@ const TEST_CASES: readonly NormalizationTestCase[] = [
   // 2. Full Sentences, Ranges, Afternoon, Minutes & Polite Particles
   {
     id: 'U11',
-    category: 'Display vs Speech POC sentence (en-dash)',
+    category:
+      'Display vs Speech POC sentence (day range + time range with en-dash)',
     input: 'จุดบริการ Demo เปิดจันทร์–ศุกร์ 09:00–16:00 น. ครับ',
-    expected: 'จุดบริการ Demo เปิดจันทร์–ศุกร์ เก้าโมงเช้าถึงสี่โมงเย็นครับ',
+    expected: 'จุดบริการ Demo เปิดวันจันทร์ถึงวันศุกร์ เก้าโมงเช้าถึงสี่โมงเย็นครับ',
   },
   {
     id: 'U12',
@@ -133,8 +134,8 @@ const TEST_CASES: readonly NormalizationTestCase[] = [
   {
     id: 'U20',
     category: 'Already-normalized Thai speech must remain unchanged',
-    input: 'จุดบริการ Demo เปิดจันทร์ถึงศุกร์ เวลา เก้าโมงเช้าถึงสี่โมงเย็นครับ',
-    expected: 'จุดบริการ Demo เปิดจันทร์ถึงศุกร์ เวลา เก้าโมงเช้าถึงสี่โมงเย็นครับ',
+    input: 'จุดบริการ Demo เปิดวันจันทร์ถึงวันศุกร์ เวลา เก้าโมงเช้าถึงสี่โมงเย็นครับ',
+    expected: 'จุดบริการ Demo เปิดวันจันทร์ถึงวันศุกร์ เวลา เก้าโมงเช้าถึงสี่โมงเย็นครับ',
   },
   {
     id: 'U21',
@@ -142,11 +143,52 @@ const TEST_CASES: readonly NormalizationTestCase[] = [
     input: '',
     expected: '',
   },
+
+  // 4. Day of the Week Range Tests (Monday-Friday, Weekend, Various Dashes, Idempotency)
+  {
+    id: 'U22',
+    category:
+      'Day range Monday to Friday with en-dash, hyphen, em-dash, and spaces',
+    input: 'เปิดจันทร์–ศุกร์ และ จันทร์-ศุกร์ และ จันทร์ — ศุกร์',
+    expected: 'เปิดวันจันทร์ถึงวันศุกร์ และ วันจันทร์ถึงวันศุกร์ และ วันจันทร์ถึงวันศุกร์',
+  },
+  {
+    id: 'U23',
+    category: 'Weekend day range Saturday to Sunday',
+    input: 'เปิดให้บริการ เสาร์–อาทิตย์ และ วันเสาร์-วันอาทิตย์ ครับ',
+    expected: 'เปิดให้บริการ วันเสาร์ถึงวันอาทิตย์ และ วันเสาร์ถึงวันอาทิตย์ ครับ',
+  },
+  {
+    id: 'U24',
+    category: 'Day range with existing วัน prefix or ถึง separator',
+    input: 'จุดบริการเปิด วันจันทร์-วันศุกร์ และ วันจันทร์ ถึง วันศุกร์',
+    expected: 'จุดบริการเปิด วันจันทร์ถึงวันศุกร์ และ วันจันทร์ถึงวันศุกร์',
+  },
+  {
+    id: 'U25',
+    category:
+      'Hyphenated non-day ranges (quantities, dates) must remain untouched by day normalizer',
+    input: 'ใช้เวลาตรวจสอบ 1-2 วัน หรือ 3-5 วันทำการ ในวันที่ 1-5',
+    expected: 'ใช้เวลาตรวจสอบ 1-2 วัน หรือ 3-5 วันทำการ ในวันที่ 1-5',
+  },
+  {
+    id: 'U26',
+    category: 'Celestial names must not trigger day range normalization',
+    input: 'สังเกตการณ์ดาวเสาร์–ดาวพฤหัส และปรากฏการณ์พระอาทิตย์–พระจันทร์',
+    expected: 'สังเกตการณ์ดาวเสาร์–ดาวพฤหัส และปรากฏการณ์พระอาทิตย์–พระจันทร์',
+  },
+  {
+    id: 'U27',
+    category:
+      'Combined day-range and clock time-range in realistic mascot answers',
+    input: 'จุดบริการ Demo เปิดจันทร์-ศุกร์ 09.00 - 16.00 น. ครับ',
+    expected: 'จุดบริการ Demo เปิดวันจันทร์ถึงวันศุกร์ เก้าโมงเช้าถึงสี่โมงเย็นครับ',
+  },
 ];
 
 function runTests(): void {
   console.log('==============================================================');
-  console.log(' Thai Speech Normalizer Unit Tests (U01 - U21 + Idempotency)  ');
+  console.log(' Thai Speech Normalizer Unit Tests (U01 - U27 + Idempotency)  ');
   console.log(
     '==============================================================\n',
   );

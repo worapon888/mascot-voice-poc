@@ -1,5 +1,5 @@
 import 'server-only';
-import { OPENAI_MODELS } from '@/lib/openai/client';
+import { getOpenAIClient, OPENAI_MODELS } from '@/lib/openai/client';
 import { getFaqAudioBucketName } from '@/lib/validations/env';
 import { normalizeThaiSpeech } from '@/lib/voice/thai-speech-normalizer';
 import { getFaqById } from '@/repositories/faq.repository';
@@ -124,6 +124,189 @@ export function computeFaqAudioIdentity(
     bucketName,
     objectPath,
     idempotencyKey: `faq:${faqId}:hash:${contentHash}`,
+  };
+}
+
+export const STANDARD_FALLBACK_ANSWER =
+  'ขออภัยครับ ตอนนี้ผมยังไม่มีข้อมูลในเรื่องนี้ กรุณาติดต่อเจ้าหน้าที่เพื่อสอบถามเพิ่มเติมนะครับ';
+
+export interface ComputedFallbackAudioIdentity {
+  canonicalAnswer: string;
+  normalizedSpeechText: string;
+  contentHash: string;
+  bucketName: string;
+  objectPath: string;
+  audioUrl: string;
+}
+
+export function computeFallbackAudioIdentity(
+  bucketName: string = getFaqAudioBucketName(),
+  storageAdapter?: FaqAudioStorageAdapter,
+): ComputedFallbackAudioIdentity {
+  const canonicalAnswer = STANDARD_FALLBACK_ANSWER;
+  const normalizedSpeechText = normalizeThaiSpeech(canonicalAnswer);
+  const contentHash = buildTtsCacheKey(
+    normalizedSpeechText,
+    OPENAI_MODELS.TTS,
+    OPENAI_MODELS.TTS_VOICE,
+    THAI_TTS_INSTRUCTIONS,
+  );
+  const objectPath = `fallback/${TTS_CACHE_VERSION}/fallback-${contentHash}.mp3`;
+  const adapter = storageAdapter ?? createSupabaseFaqAudioStorageAdapter();
+  const audioUrl = adapter.getPublicAudioUrl(bucketName, objectPath);
+
+  return {
+    canonicalAnswer,
+    normalizedSpeechText,
+    contentHash,
+    bucketName,
+    objectPath,
+    audioUrl,
+  };
+}
+
+let cachedFallbackAudioRef: PersistentFaqAudioReference | null = null;
+
+export function resetFallbackAudioCacheForTesting(): void {
+  cachedFallbackAudioRef = null;
+}
+
+export async function resolvePersistentFallbackAudioRef(
+  deps: FaqAudioLookupDependencies = {},
+): Promise<PersistentFaqAudioLookupResult> {
+  const t0 = performance.now();
+  const bucketName = getFaqAudioBucketName();
+  const adapter = deps.storageAdapter ?? createSupabaseFaqAudioStorageAdapter();
+  const identity = computeFallbackAudioIdentity(bucketName, adapter);
+
+  if (
+    cachedFallbackAudioRef &&
+    cachedFallbackAudioRef.contentHash === identity.contentHash
+  ) {
+    telemetry.persistentAudioHits += 1;
+    return {
+      hit: true,
+      reason: 'READY_VERIFIED',
+      contentHash: identity.contentHash,
+      lookupLatencyMs: 0,
+      audioRef: cachedFallbackAudioRef,
+    };
+  }
+
+  try {
+    telemetry.storageReadRequests += 1;
+    const exists = await adapter.objectExistsInStorage(
+      bucketName,
+      identity.objectPath,
+    );
+    const lookupLatencyMs = Math.round(performance.now() - t0);
+
+    if (exists) {
+      telemetry.persistentAudioHits += 1;
+      const ref: PersistentFaqAudioReference = {
+        faqId: 0,
+        contentHash: identity.contentHash,
+        audioUrl: identity.audioUrl,
+        objectPath: identity.objectPath,
+        mimeType: 'audio/mpeg',
+        byteLength: 0,
+      };
+      cachedFallbackAudioRef = ref;
+      return {
+        hit: true,
+        reason: 'READY_VERIFIED',
+        contentHash: identity.contentHash,
+        lookupLatencyMs,
+        audioRef: ref,
+      };
+    }
+
+    telemetry.persistentAudioMisses += 1;
+    return {
+      hit: false,
+      reason: 'STORAGE_OBJECT_MISSING',
+      contentHash: identity.contentHash,
+      lookupLatencyMs,
+    };
+  } catch {
+    telemetry.persistentAudioMisses += 1;
+    return {
+      hit: false,
+      reason: 'STORAGE_READ_ERROR',
+      contentHash: identity.contentHash,
+      lookupLatencyMs: Math.round(performance.now() - t0),
+    };
+  }
+}
+
+export async function ensurePersistentFallbackAudio(
+  deps: {
+    storageAdapter?: FaqAudioStorageAdapter;
+    synthesizeMp3Fn?: (normalizedText: string) => Promise<Buffer>;
+  } = {},
+): Promise<{
+  identity: ComputedFallbackAudioIdentity;
+  alreadyReady: boolean;
+  uploaded: boolean;
+  byteLength: number;
+}> {
+  const bucketName = getFaqAudioBucketName();
+  const adapter = deps.storageAdapter ?? createSupabaseFaqAudioStorageAdapter();
+  const identity = computeFallbackAudioIdentity(bucketName, adapter);
+
+  const exists = await adapter.objectExistsInStorage(
+    bucketName,
+    identity.objectPath,
+  );
+  if (exists) {
+    cachedFallbackAudioRef = {
+      faqId: 0,
+      contentHash: identity.contentHash,
+      audioUrl: identity.audioUrl,
+      objectPath: identity.objectPath,
+      mimeType: 'audio/mpeg',
+      byteLength: 0,
+    };
+    return {
+      identity,
+      alreadyReady: true,
+      uploaded: false,
+      byteLength: 0,
+    };
+  }
+
+  const synthesize =
+    deps.synthesizeMp3Fn ??
+    (async (text: string) => {
+      const client = getOpenAIClient();
+      const response = await client.audio.speech.create({
+        model: OPENAI_MODELS.TTS,
+        voice: OPENAI_MODELS.TTS_VOICE,
+        input: text,
+        instructions: THAI_TTS_INSTRUCTIONS,
+        response_format: 'mp3',
+      });
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    });
+
+  const mp3Buffer = await synthesize(identity.normalizedSpeechText);
+  await adapter.uploadAudioObject(bucketName, identity.objectPath, mp3Buffer);
+
+  cachedFallbackAudioRef = {
+    faqId: 0,
+    contentHash: identity.contentHash,
+    audioUrl: identity.audioUrl,
+    objectPath: identity.objectPath,
+    mimeType: 'audio/mpeg',
+    byteLength: mp3Buffer.length,
+  };
+
+  return {
+    identity,
+    alreadyReady: false,
+    uploaded: true,
+    byteLength: mp3Buffer.length,
   };
 }
 

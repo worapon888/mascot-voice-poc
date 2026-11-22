@@ -46,6 +46,7 @@ export async function POST(
       status: 200,
       headers: {
         ...NO_STORE_HEADERS,
+        'X-Response-Tier': metrics.tier,
         'X-FAQ-Retrieval-Latency-Ms': String(metrics.faqRetrievalLatencyMs),
         'X-LLM-Latency-Ms': String(metrics.llmLatencyMs),
         'X-OpenAI-LLM-Called': metrics.llmCalled ? '1' : '0',

@@ -139,6 +139,22 @@ export function formatClockTimeToThaiSpeech(
 }
 
 /**
+ * Matches a day-of-week range with standard dash or range separators (`-`, `–`, `—`, or `ถึง`),
+ * with or without leading `วัน` and optional whitespace.
+ * Examples:
+ * - "จันทร์–ศุกร์" -> "วันจันทร์ถึงวันศุกร์"
+ * - "วันจันทร์-วันศุกร์" -> "วันจันทร์ถึงวันศุกร์"
+ * - "จันทร์ — ศุกร์" -> "วันจันทร์ถึงวันศุกร์"
+ * - "เสาร์–อาทิตย์" -> "วันเสาร์ถึงวันอาทิตย์"
+ */
+const THAI_DAY_NAME_GROUP = '(?:วัน)?(จันทร์|อังคาร|พุธ|พฤหัสบดี|พฤหัส|ศุกร์|เสาร์|อาทิตย์)';
+
+const DAY_RANGE_PATTERN = new RegExp(
+  `(?<!พระ|ดาว|ดวง)(?<![0-9A-Za-z.-])${THAI_DAY_NAME_GROUP}\\s*(?:[-–—]|ถึง)\\s*${THAI_DAY_NAME_GROUP}(?![0-9A-Za-z.-])`,
+  'gu',
+);
+
+/**
  * Matches a clock time range with an explicit trailing Thai time unit (`น.`, `นาฬิกา`, or malformed `นา` before polite particle).
  * Examples:
  * - "09:00–16:00 น."
@@ -165,8 +181,9 @@ const SINGLE_TIME_WITH_UNIT_PATTERN =
 const DUPLICATE_POLITE_PARTICLE_PATTERN = /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)\s+\1/gu;
 
 /**
- * Deterministic, pure normalizer that converts Thai clock time expressions into natural spoken Thai
- * for Text-to-Speech (TTS) synthesis while leaving non-time numbers, prices, IDs, and ambiguous decimals untouched.
+ * Deterministic, pure normalizer that converts Thai day-of-week ranges and clock time expressions
+ * into natural spoken Thai for Text-to-Speech (TTS) synthesis while leaving non-time numbers, prices,
+ * IDs, and ambiguous decimals untouched.
  */
 export function normalizeThaiSpeech(text: string): string {
   if (!text) {
@@ -175,7 +192,15 @@ export function normalizeThaiSpeech(text: string): string {
 
   let result = text.normalize('NFC');
 
-  // 1. Convert explicit clock time ranges first (e.g., "09:00–16:00 น.", "09.00 - 16.00 น.", "09:00 น. ถึง 16:00 น.")
+  // 1. Convert explicit day-of-week ranges first (e.g., "จันทร์–ศุกร์", "วันจันทร์-วันศุกร์", "จันทร์ — ศุกร์", "เสาร์–อาทิตย์")
+  result = result.replace(
+    DAY_RANGE_PATTERN,
+    (_match, d1: string, d2: string) => {
+      return `วัน${d1}ถึงวัน${d2}`;
+    },
+  );
+
+  // 2. Convert explicit clock time ranges (e.g., "09:00–16:00 น.", "09.00 - 16.00 น.", "09:00 น. ถึง 16:00 น.")
   result = result.replace(
     TIME_RANGE_PATTERN,
     (
@@ -203,7 +228,7 @@ export function normalizeThaiSpeech(text: string): string {
     },
   );
 
-  // 2. Convert single clock times that carry an explicit Thai time unit ("น.", "นาฬิกา", or unambiguous "นาครับ")
+  // 3. Convert single clock times that carry an explicit Thai time unit ("น.", "นาฬิกา", or unambiguous "นาครับ")
   result = result.replace(
     SINGLE_TIME_WITH_UNIT_PATTERN,
     (
@@ -230,7 +255,7 @@ export function normalizeThaiSpeech(text: string): string {
     },
   );
 
-  // 3. Deduplicate adjacent polite particles if any existed in source text
+  // 4. Deduplicate adjacent polite particles if any existed in source text
   result = result.replace(DUPLICATE_POLITE_PARTICLE_PATTERN, '$1');
 
   return result;

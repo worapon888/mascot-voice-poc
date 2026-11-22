@@ -6,13 +6,23 @@ import { MAX_TEXT_CHARS } from '@/lib/validations/voice';
 import {
   type PersistentFaqAudioLookupResult,
   resolvePersistentFaqAudioRef,
+  resolvePersistentFallbackAudioRef,
+  STANDARD_FALLBACK_ANSWER,
 } from '@/services/faq-audio.service';
-import { retrieveMatchingFaqs } from '@/services/faq-matching.service';
-import type { AnswerMode, AnswerResponse, ConversationTurn } from '@/types/api';
+import {
+  isConfidentOutOfScopeOrUnknownQuery,
+  retrieveMatchingFaqs,
+} from '@/services/faq-matching.service';
+import type {
+  AnswerMode,
+  AnswerResponse,
+  ConversationTurn,
+  ResponseTier,
+} from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
 
-export const NO_MATCH_FALLBACK_ANSWER =
-  'ขออภัยครับ ขณะนี้ยังไม่มีข้อมูลเฉพาะเกี่ยวกับเรื่องนี้ในระบบสาธิต แนะนำให้สอบถามเจ้าหน้าที่ประชาสัมพันธ์หรือผู้ดูแลการสาธิตเพิ่มเติมครับ';
+export { STANDARD_FALLBACK_ANSWER };
+export const NO_MATCH_FALLBACK_ANSWER = STANDARD_FALLBACK_ANSWER;
 
 /**
  * Conservative bounded context limit (in characters) for up to 3 matched FAQs.
@@ -32,6 +42,7 @@ export interface GroundedAnswerGenerationMetrics {
   fastPathBypassedLlm: boolean;
   persistentAudioStatus: 'HIT' | 'MISS' | 'SKIPPED';
   persistentAudioLookupLatencyMs: number;
+  tier: ResponseTier;
 }
 
 export interface GroundedAnswerWithMetrics {
@@ -284,12 +295,12 @@ async function generateGuardedUnmatchedResponse(
 
 /**
  * Generates an answer for a user transcript along with detailed latency/call telemetry:
- * - Step 1 & 2: Live Supabase FAQ retrieval and deterministic Thai matching (propagating DB outages as 503)
- * - Step 3A (Fast Path): When a single FAQ matches with high confidence (`highConfidenceFastPath`),
- *   returns the canonical FAQ answer directly without calling `gpt-4.1-mini` (0 LLM cost, 0 ms LLM latency).
- * - Step 3B (LLM Grounded Path): When FAQs match with ambiguity or medium confidence, invokes `gpt-4.1-mini`
- *   with grounded FAQ evidence and factual anchor verification.
- * - Step 3C (Guarded Unmatched Path): When no FAQ matches, invokes `gpt-4.1-mini` in guarded fallback mode.
+ * - Tier 1 (FAQ Fast Path): When a single FAQ matches with high confidence (`highConfidenceFastPath`),
+ *   returns the canonical FAQ answer directly with persistent audio without calling `gpt-4.1-mini` (0 LLM cost, 0 ms LLM latency).
+ * - Tier 3 (Unknown / Out-of-Scope Fallback): When a query is confidently identified as out-of-scope or unmatched,
+ *   returns the standardized cached fallback answer and pre-generated audio directly without calling `gpt-4.1-mini`.
+ * - Tier 2 (Contextual Answer via LLM): When questions require contextual rephrasing, reverse time angle reasoning,
+ *   or multi-turn context disambiguation, invokes `gpt-4.1-mini` strictly grounded on verified FAQ evidence.
  */
 export async function generateGroundedAnswerWithMetrics(
   rawTranscript: string,
@@ -304,31 +315,16 @@ export async function generateGroundedAnswerWithMetrics(
     faqs: FaqRecord[],
     history: ReadonlyArray<ConversationTurn>,
   ) => Promise<string>,
+  customFallbackAudioResolver: () => Promise<PersistentFaqAudioLookupResult> = () =>
+    resolvePersistentFallbackAudioRef(),
 ): Promise<GroundedAnswerWithMetrics> {
   // 1. Retrieve matching FAQs live from Supabase (propagates FaqRepositoryError on DB failure -> HTTP 503)
   const retrieval = await customRetriever(rawTranscript, conversationHistory);
   const sanitizedQuestion = rawTranscript.trim().slice(0, MAX_TEXT_CHARS);
 
-  // 2. Unmatched query -> Context-Aware Guarded LLM Fallback (GENERAL_GUIDANCE or ORGANIZATION_INFO_UNKNOWN)
-  if (!retrieval.matched || retrieval.faqs.length === 0) {
-    const tLlmStart = performance.now();
-    const unmatchedResponse =
-      await generateGuardedUnmatchedResponse(sanitizedQuestion);
-    const llmLatencyMs = Math.round(performance.now() - tLlmStart);
-    return {
-      response: unmatchedResponse,
-      metrics: {
-        faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
-        llmLatencyMs,
-        llmCalled: true,
-        fastPathBypassedLlm: false,
-        persistentAudioStatus: 'SKIPPED',
-        persistentAudioLookupLatencyMs: 0,
-      },
-    };
-  }
-
-  // 3A. Safe High-Confidence FAQ Fast Path -> Return canonical FAQ answer directly (skip LLM)
+  // ---------------------------------------------------------------------------
+  // Tier 1 — Safe High-Confidence FAQ Fast Path (Skip LLM & Dynamic TTS)
+  // ---------------------------------------------------------------------------
   if (retrieval.highConfidenceFastPath && retrieval.faqs.length === 1) {
     const primaryFaq = retrieval.faqs[0];
     const canonicalAnswer = formatCanonicalFaqAnswer(primaryFaq.answer);
@@ -340,6 +336,7 @@ export async function generateGroundedAnswerWithMetrics(
           faqIds: [primaryFaq.id],
           matched: true,
           answerMode: 'FAQ_GROUNDED',
+          tier: 'TIER_1',
           ...(audioLookup.hit && audioLookup.audioRef
             ? { audioRef: audioLookup.audioRef }
             : {}),
@@ -351,12 +348,88 @@ export async function generateGroundedAnswerWithMetrics(
           fastPathBypassedLlm: true,
           persistentAudioStatus: audioLookup.hit ? 'HIT' : 'MISS',
           persistentAudioLookupLatencyMs: audioLookup.lookupLatencyMs,
+          tier: 'TIER_1',
         },
       };
     }
   }
 
-  // 3B. Matched query requiring LLM disambiguation / context checking -> FAQ_GROUNDED mode
+  // ---------------------------------------------------------------------------
+  // Tier 3 — Confident Unknown / Out-of-Scope Fallback (Skip LLM & Dynamic TTS)
+  // ---------------------------------------------------------------------------
+  if (
+    isConfidentOutOfScopeOrUnknownQuery(
+      retrieval,
+      rawTranscript,
+      conversationHistory,
+    )
+  ) {
+    const fallbackAudio = await customFallbackAudioResolver();
+    return {
+      response: {
+        answer: STANDARD_FALLBACK_ANSWER,
+        faqIds: [],
+        matched: false,
+        answerMode: 'ORGANIZATION_INFO_UNKNOWN',
+        tier: 'TIER_3',
+        ...(fallbackAudio.hit && fallbackAudio.audioRef
+          ? { audioRef: fallbackAudio.audioRef }
+          : {}),
+      },
+      metrics: {
+        faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
+        llmLatencyMs: 0,
+        llmCalled: false,
+        fastPathBypassedLlm: true,
+        persistentAudioStatus: fallbackAudio.hit ? 'HIT' : 'MISS',
+        persistentAudioLookupLatencyMs: fallbackAudio.lookupLatencyMs,
+        tier: 'TIER_3',
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tier 2 — Contextual Grounded Answer (Requires LLM reasoning)
+  // ---------------------------------------------------------------------------
+  // Case A: Unmatched or ambiguous queries not confident for Tier 3
+  if (!retrieval.matched || retrieval.faqs.length === 0) {
+    const tLlmStart = performance.now();
+    const unmatchedResponse =
+      await generateGuardedUnmatchedResponse(sanitizedQuestion);
+    const llmLatencyMs = Math.round(performance.now() - tLlmStart);
+
+    let audioRef = unmatchedResponse.audioRef;
+    let persistentAudioStatus: 'HIT' | 'MISS' | 'SKIPPED' = 'SKIPPED';
+    let persistentAudioLookupLatencyMs = 0;
+
+    if (unmatchedResponse.answer === STANDARD_FALLBACK_ANSWER) {
+      const fbLookup = await customFallbackAudioResolver();
+      persistentAudioStatus = fbLookup.hit ? 'HIT' : 'MISS';
+      persistentAudioLookupLatencyMs = fbLookup.lookupLatencyMs;
+      if (fbLookup.hit && fbLookup.audioRef) {
+        audioRef = fbLookup.audioRef;
+      }
+    }
+
+    return {
+      response: {
+        ...unmatchedResponse,
+        tier: 'TIER_2',
+        ...(audioRef ? { audioRef } : {}),
+      },
+      metrics: {
+        faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
+        llmLatencyMs,
+        llmCalled: true,
+        fastPathBypassedLlm: false,
+        persistentAudioStatus,
+        persistentAudioLookupLatencyMs,
+        tier: 'TIER_2',
+      },
+    };
+  }
+
+  // Case B: Matched FAQ requiring LLM contextual disambiguation
   const userPrompt = buildGroundedFaqPromptInput(
     retrieval.faqs,
     sanitizedQuestion,
@@ -420,20 +493,36 @@ export async function generateGroundedAnswerWithMetrics(
     answerText = answerText.slice(0, MAX_TEXT_CHARS).trim();
   }
 
+  let tier2AudioRef: PersistentFaqAudioLookupResult['audioRef'] | undefined;
+  let tier2AudioStatus: 'HIT' | 'MISS' | 'SKIPPED' = 'SKIPPED';
+  let tier2AudioLatencyMs = 0;
+
+  if (answerText === STANDARD_FALLBACK_ANSWER) {
+    const fbLookup = await customFallbackAudioResolver();
+    tier2AudioStatus = fbLookup.hit ? 'HIT' : 'MISS';
+    tier2AudioLatencyMs = fbLookup.lookupLatencyMs;
+    if (fbLookup.hit && fbLookup.audioRef) {
+      tier2AudioRef = fbLookup.audioRef;
+    }
+  }
+
   return {
     response: {
       answer: answerText,
       faqIds: retrieval.faqs.map((faq) => faq.id),
       matched: true,
       answerMode: 'FAQ_GROUNDED',
+      tier: 'TIER_2',
+      ...(tier2AudioRef ? { audioRef: tier2AudioRef } : {}),
     },
     metrics: {
       faqRetrievalLatencyMs: retrieval.retrievalLatencyMs,
       llmLatencyMs,
       llmCalled: true,
       fastPathBypassedLlm: false,
-      persistentAudioStatus: 'SKIPPED',
-      persistentAudioLookupLatencyMs: 0,
+      persistentAudioStatus: tier2AudioStatus,
+      persistentAudioLookupLatencyMs: tier2AudioLatencyMs,
+      tier: 'TIER_2',
     },
   };
 }

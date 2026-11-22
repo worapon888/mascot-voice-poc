@@ -96,6 +96,8 @@ const SUPPLEMENTAL_ALIASES_BY_QUESTION: Record<string, string[]> = {
     'เสาร์อาทิตย์เปิดไหม',
     'วันเสาร์เปิดไหม',
     'วันอาทิตย์เปิดไหม',
+    'เปิดวันเสาร์ไหม',
+    'เปิดวันอาทิตย์ไหม',
   ],
   ต้องจองคิวไหม: [
     'จองล่วงหน้า',
@@ -871,4 +873,31 @@ export async function retrieveMatchingFaqs(
     conversationHistory,
     retrievalLatencyMs,
   );
+}
+
+/**
+ * Determines whether a query can be safely and reliably classified as Tier 3
+ * (Unknown / Out-of-Scope Fallback) without invoking the LLM:
+ * 1. The query has no matched FAQs (`!retrieval.matched || retrieval.faqs.length === 0`).
+ * 2. The query does not carry an ellipsis or contextual follow-up signal referencing previous conversation turns.
+ */
+export function isConfidentOutOfScopeOrUnknownQuery(
+  retrieval: FaqRetrievalResult,
+  rawTranscript: string,
+  conversationHistory: ReadonlyArray<ConversationTurn> = [],
+): boolean {
+  if (retrieval.matched && retrieval.faqs.length > 0) {
+    return false;
+  }
+
+  // If there's an ongoing conversation and the user asks a follow-up ("แล้ววันเสาร์ล่ะ", "ถ้าไม่มีล่ะ"),
+  // do not cut off with fallback; let Tier 2 handle it with context.
+  if (
+    conversationHistory.length > 0 &&
+    hasContextualFollowUpSignal(rawTranscript)
+  ) {
+    return false;
+  }
+
+  return true;
 }

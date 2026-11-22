@@ -9,7 +9,9 @@ import {
 } from '@/repositories/faq-audio.repository';
 import {
   computeFaqAudioIdentity,
+  computeFallbackAudioIdentity,
   ensurePersistentFaqAudioForRecord,
+  ensurePersistentFallbackAudio,
   type FaqAudioGenerationOutcome,
 } from '@/services/faq-audio.service';
 import type { FaqRecord } from '@/types/faq';
@@ -44,11 +46,19 @@ export interface FaqAudioSyncPlanReport {
   totalCharsToGenerate: number;
   totalEstimatedCostUsd: number;
   items: FaqAudioPlanItem[];
+  fallbackItem?: FaqAudioPlanItem;
   executionOutcomes?: FaqAudioGenerationOutcome[];
+  fallbackOutcome?: {
+    alreadyReady: boolean;
+    uploaded: boolean;
+    byteLength: number;
+    audioUrl: string;
+  };
 }
 
 export interface RunFaqAudioSyncOptions {
   execute: boolean;
+  includeFallback?: boolean;
   faqs?: FaqRecord[];
   storageAdapter?: FaqAudioStorageAdapter;
   fetchCurrentFaqById?: (id: number) => Promise<FaqRecord | null>;
@@ -148,6 +158,40 @@ export async function runFaqAudioReconciliation(
     toGenerateItems.reduce((sum, i) => sum + i.estimatedCostUsd, 0).toFixed(6),
   );
 
+  let fallbackItem: FaqAudioPlanItem | undefined;
+  if (options.includeFallback) {
+    const fbIdentity = computeFallbackAudioIdentity(bucketName, adapter);
+    let fbReady = false;
+    try {
+      fbReady = await adapter.objectExistsInStorage(
+        bucketName,
+        fbIdentity.objectPath,
+      );
+    } catch {
+      fbReady = false;
+    }
+    const fbAction = fbReady ? 'SKIP_ALREADY_READY' : 'GENERATE_TTS';
+    const fbChars = fbIdentity.normalizedSpeechText.length;
+    fallbackItem = {
+      faqId: 0,
+      question: 'Unknown / Out-of-Scope Fallback (Tier 3)',
+      isActive: true,
+      canonicalAnswer: fbIdentity.canonicalAnswer,
+      normalizedSpeechText: fbIdentity.normalizedSpeechText,
+      contentHash: fbIdentity.contentHash,
+      objectPath: fbIdentity.objectPath,
+      alreadyReady: fbReady,
+      action: fbAction,
+      charCount: fbChars,
+      estimatedCostUsd:
+        fbAction === 'GENERATE_TTS'
+          ? Number(
+              ((fbChars / 1000) * ESTIMATED_USD_PER_1000_THAI_CHARS).toFixed(6),
+            )
+          : 0,
+    };
+  }
+
   const report: FaqAudioSyncPlanReport = {
     mode: options.execute ? 'EXECUTE' : 'DRY_RUN',
     bucketName,
@@ -158,6 +202,7 @@ export async function runFaqAudioReconciliation(
     totalCharsToGenerate,
     totalEstimatedCostUsd,
     items,
+    fallbackItem,
   };
 
   if (!options.execute) {
@@ -176,8 +221,21 @@ export async function runFaqAudioReconciliation(
     });
     executionOutcomes.push(outcome);
   }
-
   report.executionOutcomes = executionOutcomes;
+
+  if (options.includeFallback) {
+    const fbRes = await ensurePersistentFallbackAudio({
+      storageAdapter: adapter,
+      synthesizeMp3Fn: options.synthesizeMp3Fn,
+    });
+    report.fallbackOutcome = {
+      alreadyReady: fbRes.alreadyReady,
+      uploaded: fbRes.uploaded,
+      byteLength: fbRes.byteLength,
+      audioUrl: fbRes.identity.audioUrl,
+    };
+  }
+
   return report;
 }
 
@@ -200,7 +258,10 @@ async function main(): Promise<void> {
     `TTS Model:   ${OPENAI_MODELS.TTS} (voice: ${OPENAI_MODELS.TTS_VOICE})\n`,
   );
 
-  const report = await runFaqAudioReconciliation({ execute: isExecute });
+  const report = await runFaqAudioReconciliation({
+    execute: isExecute,
+    includeFallback: true,
+  });
 
   console.log(`Target Storage Bucket: ${report.bucketName}`);
   console.log(
@@ -220,6 +281,17 @@ async function main(): Promise<void> {
     );
     console.log(`         Speech Text: "${item.normalizedSpeechText}"`);
     console.log(`         Object Path: ${item.objectPath}`);
+  }
+
+  if (report.fallbackItem) {
+    console.log('\n--- Fallback Audio Version Plan ---');
+    console.log(
+      `[Fallback] (${report.fallbackItem.action}) "${report.fallbackItem.question}" -> hash=${report.fallbackItem.contentHash.slice(0, 12)}...`,
+    );
+    console.log(
+      `         Speech Text: "${report.fallbackItem.normalizedSpeechText}"`,
+    );
+    console.log(`         Object Path: ${report.fallbackItem.objectPath}`);
   }
 
   if (!isExecute) {
@@ -244,6 +316,13 @@ async function main(): Promise<void> {
     if (out.outcome === 'FAILED') {
       failedCount += 1;
     }
+  }
+
+  if (report.fallbackOutcome) {
+    console.log(
+      `[Fallback] Outcome=${report.fallbackOutcome.alreadyReady ? 'ALREADY_READY' : 'GENERATED_AND_READY'} | Uploaded=${report.fallbackOutcome.uploaded} | Bytes=${report.fallbackOutcome.byteLength}`,
+    );
+    console.log(`         URL: ${report.fallbackOutcome.audioUrl}`);
   }
 
   if (failedCount > 0) {

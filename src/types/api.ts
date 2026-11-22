@@ -10,6 +10,8 @@ export interface SttResponse {
 export type AnswerMode =
   'FAQ_GROUNDED' | 'GENERAL_GUIDANCE' | 'ORGANIZATION_INFO_UNKNOWN';
 
+export type ResponseTier = 'TIER_1' | 'TIER_2' | 'TIER_3';
+
 export type ConversationTurnRole = 'user' | 'assistant';
 
 export interface ConversationTurn {
@@ -32,6 +34,7 @@ export interface AnswerResponse {
   faqIds: number[];
   matched: boolean;
   answerMode?: AnswerMode;
+  tier?: ResponseTier;
   audioRef?: AnswerAudioRef;
 }
 
