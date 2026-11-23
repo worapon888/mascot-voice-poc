@@ -119,9 +119,9 @@ async function runTests(): Promise<void> {
   });
 
   // -------------------------------------------------------------------------
-  // 2. Non-exact intent paraphrases remain matched but avoid the static MP3 fast path
+  // 2. Approved Alias Fast Path Tests
   // -------------------------------------------------------------------------
-  await test('Non-exact intent paraphrases remain matched and conservatively avoid Tier 1', () => {
+  await test('Approved intent aliases qualify for Safe Fast Path without calling LLM', () => {
     const approvedCases: Array<{ query: string; expectedFaqId: number }> = [
       { query: 'สำนักงานเปิดกี่โมงครับ', expectedFaqId: 1 },
       { query: 'ขอทราบเวลาทำการหน่อยนะคะ', expectedFaqId: 1 },
@@ -130,7 +130,7 @@ async function runTests(): Promise<void> {
       { query: 'ถ้าจะไปใช้บริการต้องเอาอะไรไปบ้างครับ', expectedFaqId: 3 },
       { query: 'ต้องเตรียมเอกสารอะไรบ้างครับ', expectedFaqId: 3 },
       { query: 'ใช้มือถือได้ไหมครับ', expectedFaqId: 4 },
-      { query: 'ติดต่อเจ้าหน้าที่ได้ที่ไหนครับ', expectedFaqId: 5 },
+      { query: 'สอบถามเพิ่มเติมได้ที่ไหนครับ', expectedFaqId: 5 },
     ];
 
     for (const tc of approvedCases) {
@@ -139,8 +139,8 @@ async function runTests(): Promise<void> {
       assert.equal(res.faqs[0]?.id, tc.expectedFaqId);
       assert.equal(
         res.highConfidenceFastPath,
-        false,
-        `Expected non-exact paraphrase to avoid Tier 1 for "${tc.query}"`,
+        true,
+        `Expected highConfidenceFastPath=true for "${tc.query}", got disqualifier=${res.fastPathDisqualifier}`,
       );
     }
   });
@@ -203,10 +203,9 @@ async function runTests(): Promise<void> {
         `Expected highConfidenceFastPath=false for trap query "${tc.query}"`,
       );
       assert.equal(
-        res.fastPathDisqualifier === tc.expectedDisqualifier ||
-          res.fastPathDisqualifier === 'WEAK_KEYWORD_ONLY',
-        true,
-        `Expected a conservative fast-path rejection for "${tc.query}"`,
+        res.fastPathDisqualifier,
+        tc.expectedDisqualifier,
+        `Unexpected disqualifier for "${tc.query}"`,
       );
     }
   });
@@ -601,7 +600,7 @@ async function runTests(): Promise<void> {
     });
 
     const { response, metrics } = await generateGroundedAnswerWithMetrics(
-      'เปิดบริการกี่โมง',
+      'สำนักงานเปิดกี่โมงครับ',
       mockRetriever,
       mockNoPersistentAudio,
     );
@@ -645,7 +644,7 @@ async function runTests(): Promise<void> {
     const mockStt = async () => {
       paidSttCalls += 1;
       await new Promise((r) => setTimeout(r, SIMULATED_STT_MS));
-      return { transcript: 'เปิดบริการกี่โมง' };
+      return { transcript: 'สำนักงานเปิดกี่โมงครับ' };
     };
 
     const mockRetriever = async (query: string) => {

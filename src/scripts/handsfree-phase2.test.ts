@@ -577,7 +577,7 @@ const tests: TestCase[] = [
       assert.equal(hasContextualFollowUpSignal('ถ้าไม่มีล่ะ'), true);
       assert.equal(hasContextualFollowUpSignal('ต้องจองคิวล่วงหน้าไหม'), false);
 
-      // Follow-up 1 requires Tier 2 wording even though FAQ #1 remains the evidence.
+      // Follow-up 1: "แล้ววันเสาร์ล่ะครับ" with Turn 1 FAQ #1 qualifies for Option B Safe Fast Path
       const fastPathFollowUp = matchFaqsWithConversationContext(
         'แล้ววันเสาร์ล่ะครับ',
         DEMO_FAQS,
@@ -585,7 +585,7 @@ const tests: TestCase[] = [
       );
       assert.equal(fastPathFollowUp.matched, true);
       assert.equal(fastPathFollowUp.faqs[0].id, 1);
-      assert.equal(fastPathFollowUp.highConfidenceFastPath, false);
+      assert.equal(fastPathFollowUp.highConfidenceFastPath, true);
 
       // Follow-up 2: Contextual Ambiguous Follow-up ("ถ้าไม่มีล่ะ") relies on Turn 1 FAQ #3 ("เตรียมเอกสารอะไร")
       // and requires Grounded LLM reasoning (cannot be resolved by Fast Path)
@@ -673,7 +673,7 @@ const tests: TestCase[] = [
 
       let llmCalledCount = 0;
       const fastPathResult = await generateGroundedAnswerWithMetrics(
-        'เตรียมเอกสารอะไร',
+        'ต้องเตรียมเอกสารอะไรบ้างครับ',
         async (q, hist) =>
           matchFaqsWithConversationContext(q, DEMO_FAQS, hist, 1),
         async (faq) => ({

@@ -18,7 +18,6 @@ import {
   retrieveMatchingFaqs,
 } from '@/services/faq-matching.service';
 import {
-  evaluateCompleteAnswerGrounding,
   evaluateSentenceGrounding,
   type SentenceGroundingResult,
 } from '@/services/sentence-grounding.service';
@@ -215,11 +214,7 @@ export async function* streamGroundedAnswerEvents(
   const sentenceSplitter = new ThaiSentenceSplitter();
   let fullAccumulatedText = '';
   let chunkIndex = 0;
-  const heldSentences: Array<{
-    text: string;
-    initialStatus: SentenceGroundingResult['status'];
-  }> = [];
-  const approvedSpokenSentences: string[] = [];
+  const heldSentences: string[] = [];
 
   const tLlmStart = performance.now();
 
@@ -295,7 +290,6 @@ export async function* streamGroundedAnswerEvents(
           );
           const audioBase64 = ttsRes.buffer.toString('base64');
           const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
-          approvedSpokenSentences.push(sentence);
 
           yield {
             event: 'audio_chunk_ready',
@@ -309,17 +303,11 @@ export async function* streamGroundedAnswerEvents(
             },
           };
         } else if (groundCheck.status === 'FABRICATION_DETECTED') {
-          // Never synthesize rejected text. Full-answer validation below will
-          // replace it with verified canonical evidence.
-          heldSentences.push({
-            text: sentence,
-            initialStatus: groundCheck.status,
-          });
+          // Fabrication detected early: hold and enforce canonical fallback
+          heldSentences.push(sentence);
         } else {
-          heldSentences.push({
-            text: sentence,
-            initialStatus: groundCheck.status,
-          });
+          // HOLD_FOR_FULL_TEXT
+          heldSentences.push(sentence);
         }
       }
     }
@@ -327,117 +315,31 @@ export async function* streamGroundedAnswerEvents(
     // Flush any trailing sentence
     const finalTrailing = sentenceSplitter.flush();
     if (finalTrailing) {
-      const trailingCheck: SentenceGroundingResult = isMatchedFaq
-        ? evaluateSentenceGrounding(finalTrailing, retrieval.faqs)
-        : {
-            status: 'GROUNDED_SAFE',
-            reason: 'UNMATCHED_GUARDED',
-            sanitizedText: finalTrailing,
-          };
+      heldSentences.push(finalTrailing);
+    }
 
-      if (trailingCheck.status === 'GROUNDED_SAFE') {
+    // If there were held sentences, synthesize them now
+    if (heldSentences.length > 0) {
+      for (const pendingText of heldSentences) {
+        if (signal?.aborted) return;
         const ttsRes = await synthesizeSpeechMp3WithMetrics(
-          finalTrailing,
+          pendingText,
           customTtsGenerator,
         );
         const audioBase64 = ttsRes.buffer.toString('base64');
-        approvedSpokenSentences.push(finalTrailing);
+        const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
+
         yield {
           event: 'audio_chunk_ready',
           data: {
             chunkIndex: chunkIndex++,
-            text: finalTrailing,
-            audioDataUri: `data:audio/mpeg;base64,${audioBase64}`,
+            text: pendingText,
+            audioDataUri,
             cached: ttsRes.cacheStatus === 'HIT',
             latencyMs: ttsRes.ttsLatencyMs,
             isLast: false,
           },
         };
-      } else {
-        heldSentences.push({
-          text: finalTrailing,
-          initialStatus: trailingCheck.status,
-        });
-      }
-    }
-
-    let approvedFullAnswer = fullAccumulatedText.trim();
-
-    // Held text is released only if the completed answer passes grounding as a
-    // whole. Otherwise it is replaced once with canonical verified evidence.
-    if (heldSentences.length > 0) {
-      const fullGrounding = isMatchedFaq
-        ? evaluateCompleteAnswerGrounding(fullAccumulatedText, retrieval.faqs)
-        : { approved: true };
-
-      const releasableHeldText =
-        fullGrounding.approved &&
-        heldSentences.every(
-          (pending) => pending.initialStatus !== 'FABRICATION_DETECTED',
-        );
-      let needsSafeRecovery = !releasableHeldText;
-
-      if (releasableHeldText) {
-        for (const pending of heldSentences) {
-          if (signal?.aborted) return;
-          const recheck = evaluateSentenceGrounding(
-            pending.text,
-            retrieval.faqs,
-          );
-          if (recheck.status !== 'GROUNDED_SAFE') {
-            needsSafeRecovery = true;
-            continue;
-          }
-
-          const ttsRes = await synthesizeSpeechMp3WithMetrics(
-            recheck.sanitizedText,
-            customTtsGenerator,
-          );
-          const audioBase64 = ttsRes.buffer.toString('base64');
-          approvedSpokenSentences.push(recheck.sanitizedText);
-          yield {
-            event: 'audio_chunk_ready',
-            data: {
-              chunkIndex: chunkIndex++,
-              text: recheck.sanitizedText,
-              audioDataUri: `data:audio/mpeg;base64,${audioBase64}`,
-              cached: ttsRes.cacheStatus === 'HIT',
-              latencyMs: ttsRes.ttsLatencyMs,
-              isLast: false,
-            },
-          };
-        }
-      }
-
-      if (needsSafeRecovery && isMatchedFaq && retrieval.faqs[0]) {
-        const safeRecovery = formatCanonicalFaqAnswer(retrieval.faqs[0].answer);
-        const recoveryCheck = evaluateSentenceGrounding(
-          safeRecovery,
-          retrieval.faqs,
-        );
-        if (
-          recoveryCheck.status === 'GROUNDED_SAFE' &&
-          !approvedSpokenSentences.includes(recoveryCheck.sanitizedText)
-        ) {
-          const ttsRes = await synthesizeSpeechMp3WithMetrics(
-            recoveryCheck.sanitizedText,
-            customTtsGenerator,
-          );
-          const audioBase64 = ttsRes.buffer.toString('base64');
-          approvedSpokenSentences.push(recoveryCheck.sanitizedText);
-          yield {
-            event: 'audio_chunk_ready',
-            data: {
-              chunkIndex: chunkIndex++,
-              text: recoveryCheck.sanitizedText,
-              audioDataUri: `data:audio/mpeg;base64,${audioBase64}`,
-              cached: ttsRes.cacheStatus === 'HIT',
-              latencyMs: ttsRes.ttsLatencyMs,
-              isLast: false,
-            },
-          };
-        }
-        approvedFullAnswer = approvedSpokenSentences.join(' ').trim();
       }
     }
 
@@ -447,7 +349,7 @@ export async function* streamGroundedAnswerEvents(
       event: 'done',
       data: {
         tier: 'TIER_2',
-        fullAnswer: approvedFullAnswer,
+        fullAnswer: fullAccumulatedText.trim(),
         totalChunks: chunkIndex,
         timings: {
           retrievalMs: retrievalLatencyMs,

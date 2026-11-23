@@ -306,7 +306,7 @@ test(
 
     // Warm call with seeded cache
     const result1 = matchFaqsWithConversationContext(
-      'เปิดบริการกี่โมง',
+      'เปิดกี่โมง',
       mockCacheStorage,
       [],
     );
@@ -452,7 +452,7 @@ test(
     resetActiveFaqsCacheForTesting();
     resetPersistentFaqAudioCacheForTesting();
 
-    // Case A: canonical FAQ #1 question -> Tier 1
+    // Case A: FAQ #1 "เปิดกี่โมง" -> Tier 1
     const mockRetriever = async (
       q: string,
       h: ReadonlyArray<ConversationTurn> = [],
@@ -474,7 +474,7 @@ test(
     });
 
     const resA = await generateGroundedAnswerWithMetrics(
-      'เปิดบริการกี่โมง',
+      'เปิดกี่โมง',
       mockRetriever,
       mockAudioResolver,
     );
