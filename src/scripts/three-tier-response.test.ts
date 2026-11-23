@@ -144,7 +144,7 @@ async function runTests(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Tier 1: "วันเสาร์เปิดไหม" -> Matches FAQ #1 via Hybrid Semantic Retrieval
+  // 3. Tier 2: "วันเสาร์เปิดไหม" requires a direct boolean response
   // ---------------------------------------------------------------------------
   {
     process.env.FAQ_MATCHER = 'hybrid';
@@ -165,22 +165,24 @@ async function runTests(): Promise<void> {
           byteLength: 103296,
         },
       }),
+      [],
+      async () => 'วันเสาร์ไม่อยู่ในวันเปิดบริการครับ จุดบริการเปิดจันทร์–ศุกร์ 09:00–16:00 น.',
     );
 
-    assert.equal(res.response.tier, 'TIER_1');
+    assert.equal(res.response.tier, 'TIER_2');
     assert.equal(res.response.matched, true);
     assert.deepEqual(res.response.faqIds, [1]);
-    assert.equal(res.metrics.llmCalled, false);
-    assert.equal(res.metrics.fastPathBypassedLlm, true);
-    assert.equal(res.metrics.persistentAudioStatus, 'HIT');
+    assert.equal(res.metrics.llmCalled, true);
+    assert.equal(res.metrics.fastPathBypassedLlm, false);
+    assert.equal(res.metrics.persistentAudioStatus, 'SKIPPED');
     console.log(
-      '[PASS] R03 — "วันเสาร์เปิดไหม" -> Tier 1 (Matches FAQ #1 via Hybrid Semantic Search, Fast Path)',
+      '[PASS] R03 — "วันเสาร์เปิดไหม" -> Tier 2 (Grounded boolean response)',
     );
     passed += 1;
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Tier 1: Contextual Follow-up on FAQ #4 ("แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ")
+  // 4. Tier 2: Contextual Follow-up on FAQ #4
   // ---------------------------------------------------------------------------
   {
     process.env.FAQ_MATCHER = 'hybrid';
@@ -211,15 +213,17 @@ async function runTests(): Promise<void> {
         },
       }),
       history,
+      async () =>
+        'ระบบแนะนำให้ใช้ Chrome Desktop ครับ ส่วน Mobile ยังไม่รับรองจนกว่าจะทดสอบ',
     );
 
-    assert.equal(res.response.tier, 'TIER_1');
+    assert.equal(res.response.tier, 'TIER_2');
     assert.equal(res.response.matched, true);
     assert.deepEqual(res.response.faqIds, [4]);
-    assert.equal(res.metrics.llmCalled, false);
-    assert.equal(res.metrics.fastPathBypassedLlm, true);
+    assert.equal(res.metrics.llmCalled, true);
+    assert.equal(res.metrics.fastPathBypassedLlm, false);
     console.log(
-      '[PASS] R04 — Contextual Follow-up on FAQ #4 ("แล้วมันเปิดได้ในเบราว์เซอร์ไหนบ้างล่ะครับ") -> Tier 1 Fast Path',
+      '[PASS] R04 — Contextual Follow-up on FAQ #4 -> Tier 2 grounded synthesis',
     );
     passed += 1;
   }

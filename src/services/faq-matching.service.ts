@@ -1,9 +1,16 @@
 import 'server-only';
 import { getFaqMatcherMode } from '@/lib/validations/env';
-import { getActiveFaqs } from '@/repositories/faq.repository';
+import {
+  getActiveFaqs,
+  searchActiveFaqsLexically,
+} from '@/repositories/faq.repository';
 import { executeHybridFaqRetrieval } from '@/services/hybrid-faq-retrieval.service';
 import type { ConversationTurn } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
+import type {
+  AnswerSuitability,
+  IntentCoverage,
+} from '@/services/answer-suitability.service';
 
 export const MAX_MATCHED_FAQS = 3;
 const MIN_MATCH_SCORE = 35;
@@ -182,7 +189,7 @@ export interface ScoredFaqMatch {
 }
 
 export type FastPathMatchReason =
-  'EXACT_QUESTION' | 'APPROVED_INTENT_ALIAS' | 'NONE';
+  'EXACT_QUESTION' | 'SUITABLE_PARAPHRASE' | 'NONE';
 
 export type FastPathDisqualifier =
   | 'NO_MATCH'
@@ -206,6 +213,10 @@ export interface FaqRetrievalResult {
   fastPathMatchReason: FastPathMatchReason;
   fastPathDisqualifier?: FastPathDisqualifier;
   retrievalLatencyMs: number;
+  answerSuitability?: AnswerSuitability;
+  intentCoverage?: IntentCoverage;
+  suitabilityReasons?: string[];
+  suitabilityCheckDurationMs?: number;
 }
 
 /**
@@ -633,6 +644,7 @@ export function matchFaqsAgainstRecords(
  */
 const CONTEXTUAL_FOLLOW_UP_PATTERNS: readonly RegExp[] = [
   /^(แล้ว|งั้น|อ้าว|เอ่อ)\s*(ถ้า|วัน|ช่วง|ตอน|อัน|เรื่อง|กรณี|แบบ|เวลา)/u,
+  /^(แล้ว|งั้น|อ้าว|เอ่อ)\s*(มัน|นี่|นั่น|นี้|นั้น)/u,
   /อันนั้น/u,
   /อันนี้/u,
   /เรื่องนี้/u,
@@ -691,6 +703,21 @@ export function matchFaqsWithConversationContext(
   );
 
   if (!conversationHistory || conversationHistory.length === 0) {
+    if (
+      hasContextualFollowUpSignal(rawTranscript) &&
+      !primary.highConfidenceFastPath
+    ) {
+      return {
+        ...primary,
+        matched: false,
+        ambiguous: false,
+        faqs: [],
+        scoredMatches: [],
+        highConfidenceFastPath: false,
+        fastPathMatchReason: 'NONE',
+        fastPathDisqualifier: 'CONTEXTUAL_FOLLOW_UP',
+      };
+    }
     return primary;
   }
 
@@ -743,7 +770,7 @@ export function matchFaqsWithConversationContext(
       recentFaqId === null ||
       recentFaqId === primaryId ||
       primary.fastPathMatchReason === 'EXACT_QUESTION' ||
-      primary.fastPathMatchReason === 'APPROVED_INTENT_ALIAS'
+      primary.fastPathMatchReason === 'SUITABLE_PARAPHRASE'
     ) {
       return primary;
     }
@@ -765,17 +792,8 @@ export function matchFaqsWithConversationContext(
   const combinedScores: ScoredFaqMatch[] = [];
   const includedIds = new Set<number>();
 
-  for (const scoredItem of primary.scoredMatches) {
-    if (
-      !includedIds.has(scoredItem.faq.id) &&
-      combinedFaqs.length < MAX_MATCHED_FAQS
-    ) {
-      includedIds.add(scoredItem.faq.id);
-      combinedFaqs.push(scoredItem.faq);
-      combinedScores.push(scoredItem);
-    }
-  }
-
+  // A true follow-up is anchored to the most recently referenced evidence.
+  // Put context first, then add new lexical candidates for disambiguation.
   for (const refId of referencedFaqIds) {
     const faq = faqById.get(refId);
     if (
@@ -790,6 +808,26 @@ export function matchFaqsWithConversationContext(
         score: MIN_MATCH_SCORE,
         matchedTerms: [`context:faq#${faq.id}`],
       });
+    }
+  }
+
+  for (const scoredItem of primary.scoredMatches) {
+    const isReferenced = referencedFaqIds.includes(scoredItem.faq.id);
+    const isExplicitNewIntent =
+      scoredItem.score >= 100 ||
+      scoredItem.matchedTerms.some(
+        (term) => term.startsWith('exact:') || term.startsWith('question:'),
+      );
+    if (!isReferenced && !isExplicitNewIntent) {
+      continue;
+    }
+    if (
+      !includedIds.has(scoredItem.faq.id) &&
+      combinedFaqs.length < MAX_MATCHED_FAQS
+    ) {
+      includedIds.add(scoredItem.faq.id);
+      combinedFaqs.push(scoredItem.faq);
+      combinedScores.push(scoredItem);
     }
   }
 
@@ -839,7 +877,21 @@ export async function retrieveMatchingFaqs(
       // 2. If DB is inaccessible (getActiveFaqs throws FaqRepositoryError), let it throw
       //    so the API controller returns 503 instead of treating failure as "no FAQ".
       const t0 = performance.now();
-      const activeFaqs = await getActiveFaqs();
+      let activeFaqs: FaqRecord[];
+      try {
+        const databaseCandidates =
+          await searchActiveFaqsLexically(rawTranscript);
+        const previewFaqs = await getActiveFaqs();
+        const candidatesById = new Map<number, FaqRecord>();
+        for (const faq of [...databaseCandidates, ...previewFaqs]) {
+          candidatesById.set(faq.id, faq);
+        }
+        activeFaqs = Array.from(candidatesById.values());
+      } catch {
+        // Older installations without search_tsv retain the bounded legacy
+        // fallback. The primary hybrid RPC and direct exact lookup remain live.
+        activeFaqs = await getActiveFaqs();
+      }
       const retrievalLatencyMs = Math.round(performance.now() - t0);
       return matchFaqsWithConversationContext(
         rawTranscript,
