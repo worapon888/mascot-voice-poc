@@ -5,9 +5,19 @@ import type { FaqRecord } from '@/types/faq';
 const FAQ_TABLE = 'faqs';
 const FAQ_SELECT_COLUMNS =
   'id, question, answer, keywords, is_active, created_at';
-const MAX_POC_FAQ_LIMIT = 10;
+export const MAX_POC_FAQ_LIMIT = 10;
 const MAX_DATABASE_CANDIDATE_LIMIT = 50;
 const MAX_EXACT_LOOKUP_CACHE_ENTRIES = 1_000;
+
+let faqDbQueryCount = 0;
+
+export function getFaqDbQueryCount(): number {
+  return faqDbQueryCount;
+}
+
+export function resetFaqDbQueryCountForTesting(): void {
+  faqDbQueryCount = 0;
+}
 
 interface CachedActiveFaqs {
   records: FaqRecord[];
@@ -77,6 +87,7 @@ export async function getActiveFaqs(
   }
 
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
 
   const { data, error } = await supabase
     .from(FAQ_TABLE)
@@ -118,6 +129,7 @@ export async function findActiveFaqByQuestion(
   }
 
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
   const { data, error } = await supabase
     .from(FAQ_TABLE)
     .select(FAQ_SELECT_COLUMNS)
@@ -154,6 +166,7 @@ export async function getActiveFaqsByIds(
   if (safeIds.length === 0) return [];
 
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
   const { data, error } = await supabase
     .from(FAQ_TABLE)
     .select(FAQ_SELECT_COLUMNS)
@@ -209,6 +222,7 @@ export async function searchActiveFaqsLexically(
     MAX_DATABASE_CANDIDATE_LIMIT,
   );
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
   const { data, error } = await supabase
     .from(FAQ_TABLE)
     .select(FAQ_SELECT_COLUMNS)
@@ -232,6 +246,7 @@ export async function searchActiveFaqsLexically(
  */
 export async function getFaqById(id: number): Promise<FaqRecord | null> {
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
 
   const { data, error } = await supabase
     .from(FAQ_TABLE)
@@ -258,6 +273,7 @@ export async function getAllFaqs(
 ): Promise<FaqRecord[]> {
   const safeLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_POC_FAQ_LIMIT);
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
 
   const { data, error } = await supabase
     .from(FAQ_TABLE)
@@ -284,6 +300,7 @@ export async function setFaqActiveStatus(
   isActive: boolean,
 ): Promise<FaqRecord> {
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
 
   const { data, error } = await supabase
     .from(FAQ_TABLE)
@@ -313,6 +330,7 @@ export async function updateFaqAnswer(
   answer: string,
 ): Promise<FaqRecord> {
   const supabase = getSupabaseServerClient();
+  faqDbQueryCount += 1;
 
   const { data, error } = await supabase
     .from(FAQ_TABLE)

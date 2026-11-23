@@ -9,7 +9,33 @@ export const MAX_BROWSER_AUDIO_BYTES = 3 * 1024 * 1024; // 3 MB
 export const MAX_RECORDING_SECONDS = 20;
 export const MAX_CLIENT_CONVERSATION_HISTORY_TURNS = 4;
 
+export interface StreamingAnswerTimings {
+  retrievalMs?: number;
+  llmTtftMs?: number;
+  firstSentenceMs?: number;
+  firstAudioReadyMs?: number;
+  llmMs?: number;
+  ttsMs?: number;
+  persistentAudioLookupMs?: number;
+  persistentAudioCacheHit?: boolean;
+  retrievalMetrics?: {
+    dbQueries?: number;
+    faqCacheHit?: boolean;
+    embeddingCalled?: boolean;
+    embeddingCacheHit?: boolean;
+    embeddingMs?: number;
+    rpcMs?: number;
+  };
+}
+
 export interface StreamingAnswerCallbacks {
+  onRetrievalComplete?: (data: {
+    latencyMs: number;
+    faqCount: number;
+    matched: boolean;
+    highConfidenceFastPath: boolean;
+    retrievalMetrics?: StreamingAnswerTimings['retrievalMetrics'];
+  }) => void | Promise<void>;
   onTier?: (data: {
     tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
     matched: boolean;
@@ -29,6 +55,7 @@ export interface StreamingAnswerCallbacks {
     tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
     fullAnswer: string;
     totalChunks: number;
+    timings?: StreamingAnswerTimings;
   }) => void | Promise<void>;
 }
 
@@ -394,7 +421,16 @@ export async function requestStreamingGroundedAnswer(
           continue;
         }
 
-        if (eventType === 'tier') {
+        if (eventType === 'retrieval_complete') {
+          callbacks.onRetrievalComplete?.({
+            latencyMs: Number(parsed.latencyMs ?? 0),
+            faqCount: Number(parsed.faqCount ?? 0),
+            matched: Boolean(parsed.matched),
+            highConfidenceFastPath: Boolean(parsed.highConfidenceFastPath),
+            retrievalMetrics: parsed.retrievalMetrics as
+              StreamingAnswerTimings['retrievalMetrics'] | undefined,
+          });
+        } else if (eventType === 'tier') {
           callbacks.onTier?.({
             tier: parsed.tier as 'TIER_1' | 'TIER_2' | 'TIER_3',
             matched: Boolean(parsed.matched),
@@ -424,6 +460,7 @@ export async function requestStreamingGroundedAnswer(
             tier: parsed.tier as 'TIER_1' | 'TIER_2' | 'TIER_3',
             fullAnswer: parsed.fullAnswer as string,
             totalChunks: parsed.totalChunks as number,
+            timings: parsed.timings as StreamingAnswerTimings | undefined,
           });
         } else if (eventType === 'error') {
           throw new ClientVoiceError(

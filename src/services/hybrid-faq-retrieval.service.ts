@@ -6,12 +6,16 @@ import {
   findActiveFaqByQuestion,
   getActiveFaqs,
   getActiveFaqsByIds,
+  getActiveFaqsCacheStats,
+  getFaqDbQueryCount,
+  MAX_POC_FAQ_LIMIT,
 } from '@/repositories/faq.repository';
 import {
   evaluateAnswerSuitability,
   extractRequiredIntentSegments,
   type IntentCoverage,
 } from '@/services/answer-suitability.service';
+import { primePersistentFaqAudioCacheFromRpc } from '@/services/faq-audio.service';
 import {
   extractQuestionCore,
   hasContextualFollowUpSignal,
@@ -208,6 +212,13 @@ export async function executeHybridFaqRetrieval(
   activeFaqsPromise?: Promise<FaqRecord[]>,
 ): Promise<FaqRetrievalResult> {
   const t0 = performance.now();
+  const dbCountStart = getFaqDbQueryCount();
+  const faqCacheHit = !activeFaqsPromise && getActiveFaqsCacheStats().cached;
+  let rpcQueries = 0;
+  let embeddingCalled = false;
+  let embeddingCacheHit = false;
+  let embeddingMs = 0;
+  let rpcMs = 0;
 
   const norm = normalizeThaiText(rawTranscript);
   const politeStripped = stripTrailingPoliteParticles(norm);
@@ -232,10 +243,25 @@ export async function executeHybridFaqRetrieval(
     }
   }
 
-  const contextualFaqs =
-    !activeFaqsPromise && referencedFaqIds.length > 0
-      ? await getActiveFaqsByIds(referencedFaqIds)
-      : activeFaqs.filter((faq) => referencedFaqIds.includes(faq.id));
+  const activeFaqById = new Map<number, FaqRecord>(
+    activeFaqs.map((faq) => [faq.id, faq]),
+  );
+  const missingReferencedIds = referencedFaqIds.filter(
+    (id) => !activeFaqById.has(id),
+  );
+  const fetchedMissingFaqs =
+    !activeFaqsPromise &&
+    missingReferencedIds.length > 0 &&
+    activeFaqs.length >= MAX_POC_FAQ_LIMIT
+      ? await getActiveFaqsByIds(missingReferencedIds)
+      : [];
+  const fetchedById = new Map<number, FaqRecord>(
+    fetchedMissingFaqs.map((faq) => [faq.id, faq]),
+  );
+  const contextualFaqs: FaqRecord[] = referencedFaqIds.flatMap((id) => {
+    const faq = activeFaqById.get(id) ?? fetchedById.get(id);
+    return faq ? [faq] : [];
+  });
   const candidateFaqMap = new Map<number, FaqRecord>();
   for (const faq of [...activeFaqs, ...contextualFaqs]) {
     candidateFaqMap.set(faq.id, faq);
@@ -256,9 +282,14 @@ export async function executeHybridFaqRetrieval(
   });
 
   // The in-memory window is intentionally small. Query PostgreSQL only when a
-  // local exact match misses, so canonical questions beyond the first 10 FAQs
-  // retain the embedding-free fast path without loading the full corpus.
-  if (!exactFaq && !activeFaqsPromise) {
+  // local exact match misses AND the active FAQ count hits the window cap, so
+  // canonical questions beyond the first 10 FAQs retain the fast path without
+  // extra DB roundtrips when the entire corpus is already in memory.
+  if (
+    !exactFaq &&
+    !activeFaqsPromise &&
+    activeFaqs.length >= MAX_POC_FAQ_LIMIT
+  ) {
     exactFaq =
       (await findActiveFaqByQuestion(rawTranscript.normalize('NFC').trim())) ??
       undefined;
@@ -291,6 +322,14 @@ export async function executeHybridFaqRetrieval(
       },
       suitabilityReasons: ['EXACT_APPROVED_QUESTION'],
       suitabilityCheckDurationMs: 0,
+      retrievalMetrics: {
+        dbQueries: getFaqDbQueryCount() - dbCountStart + rpcQueries,
+        faqCacheHit,
+        embeddingCalled,
+        embeddingCacheHit,
+        embeddingMs,
+        rpcMs,
+      },
     };
   }
 
@@ -301,12 +340,17 @@ export async function executeHybridFaqRetrieval(
   const cacheKey = embedInput.replace(/\s+/g, '') || spacelessCore || norm;
   let queryVector = getCachedEmbedding(cacheKey);
 
-  if (!queryVector) {
+  if (queryVector) {
+    embeddingCacheHit = true;
+  } else {
+    embeddingCalled = true;
+    const tEmb0 = performance.now();
     const openai = getOpenAIClient();
     const embedResp = await openai.embeddings.create({
       model: 'text-embedding-3-small',
       input: embedInput,
     });
+    embeddingMs = Math.round(performance.now() - tEmb0);
     queryVector = embedResp.data[0].embedding;
     setCachedEmbedding(cacheKey, queryVector);
   }
@@ -328,6 +372,8 @@ export async function executeHybridFaqRetrieval(
   });
 
   const supabase = getSupabaseServerClient();
+  const tRpc0 = performance.now();
+  rpcQueries += 1;
   const { data: rpcRows, error: rpcErr } = await supabase.rpc(
     'match_faqs_hybrid',
     {
@@ -337,6 +383,7 @@ export async function executeHybridFaqRetrieval(
       rrf_k: 60,
     },
   );
+  rpcMs = Math.round(performance.now() - tRpc0);
 
   if (rpcErr || !rpcRows) {
     throw new Error(
@@ -367,6 +414,14 @@ export async function executeHybridFaqRetrieval(
       },
       suitabilityReasons: ['NO_RETRIEVAL_CANDIDATE'],
       suitabilityCheckDurationMs: 0,
+      retrievalMetrics: {
+        dbQueries: getFaqDbQueryCount() - dbCountStart + rpcQueries,
+        faqCacheHit,
+        embeddingCalled,
+        embeddingCacheHit,
+        embeddingMs,
+        rpcMs,
+      },
     };
   }
 
@@ -581,6 +636,14 @@ export async function executeHybridFaqRetrieval(
     }
   }
 
+  if (isHighConfidenceFastPath && matchedFaqs.length === 1) {
+    primePersistentFaqAudioCacheFromRpc(
+      matchedFaqs[0],
+      top1.audio_url,
+      top1.audio_status,
+    );
+  }
+
   return {
     normalizedTranscript: norm,
     coreQuery,
@@ -597,6 +660,14 @@ export async function executeHybridFaqRetrieval(
     intentCoverage,
     suitabilityReasons: suitabilityEvaluation.reasons,
     suitabilityCheckDurationMs: suitabilityEvaluation.durationMs,
+    retrievalMetrics: {
+      dbQueries: getFaqDbQueryCount() - dbCountStart + rpcQueries,
+      faqCacheHit,
+      embeddingCalled,
+      embeddingCacheHit,
+      embeddingMs,
+      rpcMs,
+    },
   };
 }
 

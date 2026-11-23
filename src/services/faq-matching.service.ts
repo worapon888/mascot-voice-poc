@@ -202,6 +202,15 @@ export type FastPathDisqualifier =
   | 'CONTEXTUAL_FOLLOW_UP'
   | 'WEAK_KEYWORD_ONLY';
 
+export interface FaqRetrievalMetrics {
+  dbQueries: number;
+  faqCacheHit: boolean;
+  embeddingCalled: boolean;
+  embeddingCacheHit: boolean;
+  embeddingMs: number;
+  rpcMs: number;
+}
+
 export interface FaqRetrievalResult {
   normalizedTranscript: string;
   coreQuery: string;
@@ -217,6 +226,7 @@ export interface FaqRetrievalResult {
   intentCoverage?: IntentCoverage;
   suitabilityReasons?: string[];
   suitabilityCheckDurationMs?: number;
+  retrievalMetrics?: FaqRetrievalMetrics;
 }
 
 /**

@@ -161,18 +161,21 @@ export function VoiceChat() {
       setAutoplayBlocked(false);
       setErrorMessage(null);
 
+      const streamingFlag =
+        process.env.NEXT_PUBLIC_TIER2_STREAMING_ENABLED?.trim().toLowerCase();
       const streamingEnabled =
-        process.env.NEXT_PUBLIC_TIER2_STREAMING_ENABLED?.trim().toLowerCase() ===
-        'true';
+        streamingFlag === 'true' || streamingFlag === '1';
 
       if (streamingEnabled && !isRetry) {
         try {
           setVoiceState('transcribing');
+          const tSttStart = performance.now();
           const sttRes = await requestSpeechToText(
             recordingPayload.blob,
             recordingPayload.mimeType,
             controller.signal,
           );
+          const sttMs = Math.round(performance.now() - tSttStart);
           if (currentTurnId !== turnIdRef.current) return;
 
           setTranscript(sttRes.transcript);
@@ -187,6 +190,61 @@ export function VoiceChat() {
           let isTurnMatched = false;
           let tierPlaybackPromise: Promise<void> | null = null;
 
+          const tAnswerStart = performance.now();
+          let tAnswerFirstSignal: number | null = null;
+          let tFirstAudioReady: number | null = null;
+          let hasRecordedPlaybackTiming = false;
+
+          const recordStreamingPlaybackTiming = (tPlaybackStarted: number) => {
+            if (
+              hasRecordedPlaybackTiming ||
+              currentTurnId !== turnIdRef.current
+            ) {
+              return;
+            }
+            hasRecordedPlaybackTiming = true;
+            const speechEndMs = recordingPayload.vadTimings?.speechEndMs;
+            const vadCommitMs = recordingPayload.vadTimings?.vadCommitMs;
+            const speechEndToVad =
+              speechEndMs !== undefined && vadCommitMs !== undefined
+                ? Math.round(vadCommitMs - speechEndMs)
+                : undefined;
+            const answerAnchor = tAnswerFirstSignal ?? tPlaybackStarted;
+            const audioReadyAnchor = tFirstAudioReady ?? tPlaybackStarted;
+            const sttToAnswerMs = Math.max(
+              0,
+              Math.round(answerAnchor - tAnswerStart),
+            );
+            const answerToAudioReadyMs = Math.max(
+              0,
+              Math.round(audioReadyAnchor - answerAnchor),
+            );
+            const audioReadyToPlaybackMs = Math.max(
+              0,
+              Math.round(tPlaybackStarted - audioReadyAnchor),
+            );
+            const totalE2E =
+              speechEndMs !== undefined
+                ? Math.round(tPlaybackStarted - speechEndMs)
+                : undefined;
+
+            setLastDiagnostics((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    timings: {
+                      speechEndToVadCommitMs: speechEndToVad,
+                      vadCommitToSttMs: sttMs,
+                      sttToAnswerMs,
+                      answerToAudioReadyMs,
+                      audioReadyToPlaybackMs,
+                      totalSpeechEndToPlaybackMs: totalE2E,
+                    },
+                  }
+                : prev,
+            );
+          };
+
           await requestStreamingGroundedAnswer(
             sttRes.transcript,
             {
@@ -196,6 +254,9 @@ export function VoiceChat() {
                   controller.signal.aborted
                 ) {
                   return;
+                }
+                if (tAnswerFirstSignal === null) {
+                  tAnswerFirstSignal = performance.now();
                 }
                 turnTier = tierData.tier;
                 isTurnMatched = tierData.matched;
@@ -236,6 +297,10 @@ export function VoiceChat() {
                         return;
                       }
 
+                      if (tFirstAudioReady === null) {
+                        tFirstAudioReady = performance.now();
+                      }
+
                       if (tierData.answer) {
                         turnAnswer = tierData.answer;
                         setAnswer(tierData.answer);
@@ -246,7 +311,9 @@ export function VoiceChat() {
                         startHandsFreeBargeInFnRef.current();
                       }
 
-                      const outcome = await playAudioBlob(audioBlob);
+                      const outcome = await playAudioBlob(audioBlob, () => {
+                        recordStreamingPlaybackTiming(performance.now());
+                      });
                       if (
                         currentTurnId !== turnIdRef.current ||
                         controller.signal.aborted
@@ -273,6 +340,9 @@ export function VoiceChat() {
                 ) {
                   return;
                 }
+                if (tAnswerFirstSignal === null) {
+                  tAnswerFirstSignal = performance.now();
+                }
                 turnAnswer = accumulated;
                 setAnswer(accumulated);
               },
@@ -283,12 +353,17 @@ export function VoiceChat() {
                 ) {
                   return;
                 }
+                if (tFirstAudioReady === null) {
+                  tFirstAudioReady = performance.now();
+                }
                 if (!queueHolder.current) {
                   setVoiceState('speaking');
                   if (isHandsFreeActiveRef.current) {
                     startHandsFreeBargeInFnRef.current();
                   }
-                  queueHolder.current = playAudioQueue();
+                  queueHolder.current = playAudioQueue(() => {
+                    recordStreamingPlaybackTiming(performance.now());
+                  });
                 }
                 queueHolder.current.enqueueChunk(
                   chunkData.blob,

@@ -566,6 +566,57 @@ export async function resolvePersistentFaqAudioRef(
   }
 }
 
+/**
+ * Primes the in-memory persistent audio cache from `match_faqs_hybrid` RPC metadata
+ * when `audioStatus === 'READY'` and `objectPath` matches the live FAQ answer's content hash.
+ * Eliminates a redundant `faq_audio_assets` SELECT query in Tier 1 without risking stale audio.
+ */
+export function primePersistentFaqAudioCacheFromRpc(
+  faq: FaqRecord,
+  objectPath: string | null | undefined,
+  audioStatus: string | null | undefined,
+): boolean {
+  if (!faq.is_active || audioStatus !== 'READY' || !objectPath) {
+    return false;
+  }
+
+  try {
+    const identity = computeFaqAudioIdentity(faq.id, faq.answer);
+    if (objectPath !== identity.objectPath) {
+      return false;
+    }
+
+    const cacheKey = `${faq.id}:${identity.contentHash}`;
+    const existing = persistentFaqAudioCache.get(cacheKey);
+    if (
+      existing &&
+      Date.now() - existing.cachedAt < PERSISTENT_FAQ_AUDIO_CACHE_TTL_MS
+    ) {
+      return true;
+    }
+
+    const adapter = createSupabaseFaqAudioStorageAdapter();
+    const audioRef: PersistentFaqAudioReference = {
+      faqId: faq.id,
+      contentHash: identity.contentHash,
+      audioUrl: adapter.getPublicAudioUrl(
+        identity.bucketName,
+        identity.objectPath,
+      ),
+      objectPath: identity.objectPath,
+      mimeType: 'audio/mpeg',
+      byteLength: 0,
+    };
+    persistentFaqAudioCache.set(cacheKey, {
+      audioRef,
+      cachedAt: Date.now(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export type FaqAudioGenerationStatusOutcome =
   | 'ALREADY_READY'
   | 'GENERATED_AND_READY'

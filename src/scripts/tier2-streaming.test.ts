@@ -138,6 +138,59 @@ async function runTier2StreamingTests() {
     );
   }
 
+  {
+    // S03: "ครับ" + "ผม" arriving in separate streaming deltas must NOT split into "ครับ" and "ผม"
+    const splitter = new ThaiSentenceSplitter();
+    const deltas = [
+      'จุดบริการ Demo ',
+      'เปิดวันจันทร์ถึงวันศุกร์ ',
+      '09:00–16:00 น. ',
+      'ครับ',
+      'ผม',
+    ];
+    const emitted: string[] = [];
+    for (const d of deltas) {
+      emitted.push(...splitter.feed(d));
+    }
+    const flushed = splitter.flush();
+    if (flushed) emitted.push(flushed);
+
+    assert.equal(emitted.length, 1);
+    assert.equal(
+      emitted[0],
+      'จุดบริการ Demo เปิดวันจันทร์ถึงวันศุกร์ 09:00–16:00 น. ครับผม',
+    );
+    assert.equal(emitted.includes('ผม'), false);
+    console.log(
+      '[PASS] S03 — Split "ครับ" + "ผม" deltas stay together as "ครับผม" (1 TTS call)',
+    );
+  }
+
+  {
+    // S04: Safe Thai clause splitting on long single-sentence response, never splitting inside times/units
+    const longSingle =
+      'จุดบริการ Demo เปิดวันอังคาร เวลา 09:00–16:00 น. ดังนั้นบ่ายสามยังเปิดให้บริการอยู่นะครับ';
+    const clauses = splitThaiSentences(longSingle);
+    assert.equal(clauses.length, 2);
+    assert.equal(clauses[0], 'จุดบริการ Demo เปิดวันอังคาร เวลา 09:00–16:00 น.');
+    assert.equal(clauses[1], 'ดังนั้นบ่ายสามยังเปิดให้บริการอยู่นะครับ');
+
+    const timeRangeSafe = splitThaiSentences(
+      'จุดบริการเปิดตั้งแต่เวลา 09:00 น. ถึง 16:00 น. และมีค่าบริการ 50 บาท ดังนั้นโปรดเตรียมเงินครับ',
+    );
+    assert.equal(
+      timeRangeSafe.some((c) => c.includes('09:00 น. ถึง 16:00 น.')),
+      true,
+    );
+    assert.equal(
+      timeRangeSafe.some((c) => c.includes('50 บาท')),
+      true,
+    );
+    console.log(
+      '[PASS] S04 — Safe clause splitting preserves time ranges, numbers, and units',
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // Part 2: Sentence-Level Grounding & Safety Verification
   // ---------------------------------------------------------------------------
@@ -313,6 +366,126 @@ async function runTier2StreamingTests() {
     console.log(
       `[PASS] T03 — Tier 2 Streaming emitted ${textChunkEvents.length} text deltas, ${audioChunkEvents.length} audio chunks, and completed cleanly`,
     );
+  }
+
+  // T04: Non-Blocking Ordered TTS Queue (Concurrency <= 2 & strict order even when chunk 1 finishes before chunk 0)
+  {
+    const emittedChunks: Array<{ chunkIndex: number; text: string }> = [];
+    let activeTts = 0;
+    let maxObservedConcurrency = 0;
+
+    const mockStreamer = async function* () {
+      yield 'ประโยคที่หนึ่งยาวพอสมควรเพื่อให้ตัดประโยคครับ ';
+      yield 'ประโยคที่สองยาวพอสมควรเพื่อให้ตัดประโยคครับ ';
+      yield 'ประโยคที่สามยาวพอสมควรเพื่อให้ตัดประโยคครับ ';
+      yield 'ประโยคที่สี่ยาวพอสมควรเพื่อให้ตัดประโยคครับ';
+    };
+
+    const outOfOrderTts = async (text: string) => {
+      activeTts += 1;
+      maxObservedConcurrency = Math.max(maxObservedConcurrency, activeTts);
+      // Make sentence 1 much slower than sentence 2 to verify strict ordering
+      const delay = text.includes('หนึ่ง') ? 70 : 15;
+      await new Promise((r) => setTimeout(r, delay));
+      activeTts -= 1;
+      return createSyntheticMp3Buffer(text);
+    };
+
+    for await (const ev of streamGroundedAnswerEvents({
+      rawTranscript: 'ทดสอบลำดับเสียง',
+      customRetriever: async () =>
+        createMockRetrieval({
+          matched: true,
+          faqs: [SEEDED_FAQS[0]],
+          highConfidenceFastPath: false,
+          retrievalLatencyMs: 1,
+        }),
+      customLlmStreamer: mockStreamer,
+      customTtsGenerator: outOfOrderTts,
+    })) {
+      if (ev.event === 'audio_chunk_ready') {
+        emittedChunks.push({
+          chunkIndex: ev.data.chunkIndex as number,
+          text: ev.data.text as string,
+        });
+      }
+    }
+
+    assert.equal(emittedChunks.length, 4);
+    assert.deepEqual(
+      emittedChunks.map((c) => c.chunkIndex),
+      [0, 1, 2, 3],
+    );
+    assert.equal(emittedChunks[0].text.includes('หนึ่ง'), true);
+    assert.equal(emittedChunks[1].text.includes('สอง'), true);
+    assert.equal(emittedChunks[2].text.includes('สาม'), true);
+    assert.equal(emittedChunks[3].text.includes('สี่'), true);
+    assert.equal(maxObservedConcurrency <= 2, true);
+    console.log(
+      `[PASS] T04 — Ordered TTS queue preserved [0,1,2,3] order with maxConcurrency=${maxObservedConcurrency} <= 2`,
+    );
+  }
+
+  // T05: "ครับ" + "ผม" delta split across streamGroundedAnswerEvents makes only 1 TTS call
+  {
+    let ttsCalls = 0;
+    const spoken: string[] = [];
+    for await (const ev of streamGroundedAnswerEvents({
+      rawTranscript: 'เปิดกี่โมง',
+      customRetriever: async () =>
+        createMockRetrieval({
+          matched: true,
+          faqs: [SEEDED_FAQS[0]],
+          highConfidenceFastPath: false,
+          retrievalLatencyMs: 1,
+        }),
+      customLlmStreamer: async function* () {
+        yield 'จุดบริการ Demo ';
+        yield 'เปิดวันจันทร์ถึงศุกร์ ';
+        yield '09:00–16:00 น. ';
+        yield 'ครับ';
+        yield 'ผม';
+      },
+      customTtsGenerator: async (text) => {
+        ttsCalls += 1;
+        spoken.push(text);
+        return createSyntheticMp3Buffer(text);
+      },
+    })) {
+      void ev;
+    }
+    assert.equal(ttsCalls, 1);
+    assert.equal(spoken.includes('ผม'), false);
+    console.log(
+      '[PASS] T05 — End-to-end stream with split "ครับ"+"ผม" tokens invokes TTS exactly 1 time',
+    );
+  }
+
+  // T06: TTS Error Handling in Ordered Queue yields error event cleanly
+  {
+    const events: string[] = [];
+    for await (const ev of streamGroundedAnswerEvents({
+      rawTranscript: 'ทดสอบข้อผิดพลาด',
+      customRetriever: async () =>
+        createMockRetrieval({
+          matched: true,
+          faqs: [SEEDED_FAQS[0]],
+          highConfidenceFastPath: false,
+          retrievalLatencyMs: 1,
+        }),
+      customLlmStreamer: async function* () {
+        yield 'ประโยคทดสอบข้อผิดพลาดที่ไม่เคยแคชมาก่อนเลยครับ ';
+        yield 'ประโยคที่สองครับ';
+      },
+      customTtsGenerator: async () => {
+        throw new Error('Simulated TTS upstream error');
+      },
+    })) {
+      events.push(ev.event);
+    }
+    assert.equal(events.includes('error'), true);
+    assert.equal(events.includes('audio_chunk_ready'), false);
+    console.log('[PASS] T06 — TTS error in queue emits error event cleanly');
   }
 
   // ---------------------------------------------------------------------------

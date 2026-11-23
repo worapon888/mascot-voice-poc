@@ -11,10 +11,21 @@
  */
 
 const MIN_CHUNK_CHARS = 24;
+const CLAUSE_SPLIT_MIN_CHARS = 36;
+const MIN_CLAUSE_PREFIX_CHARS = 28;
 
-// Polite sentence terminators
+// Polite sentence terminators must be followed by an explicit delimiter
+// (never end-of-buffer `$`) so split tokens like "ครับ" + "ผม" are not
+// prematurely severed across streaming deltas.
 const POLITE_PARTICLE_BOUNDARY_REGEX =
-  /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)([\s\n.,!?]|$)/u;
+  /(ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ)([\s\n.,!?])/u;
+
+// Safe Thai clause connectors for early TTS pipelining on long single-sentence
+// responses that place the polite particle only at the very end.
+const SAFE_CLAUSE_CONNECTOR_REGEX = /\s+(?=(?:โดย|ดังนั้น|ส่วน|เพราะ|ซึ่ง|ทั้งนี้))/u;
+
+const INCOMPLETE_TAIL_REGEX =
+  /(?:เวลา|ตั้งแต่|ถึง|จนถึง|วันที่|วัน|ชั้น|ราคา|รหัส|ประมาณ|\d+)$/u;
 
 export class ThaiSentenceSplitter {
   private buffer = '';
@@ -103,7 +114,25 @@ export class ThaiSentenceSplitter {
       }
     }
 
-    // 3. Fallback: if buffer grows too large (> 120 chars without boundary),
+    // 3. Safe Thai clause boundary for long single-sentence responses
+    if (text.length >= CLAUSE_SPLIT_MIN_CHARS) {
+      const clauseSlice = text.slice(MIN_CLAUSE_PREFIX_CHARS);
+      const clauseMatch = SAFE_CLAUSE_CONNECTOR_REGEX.exec(clauseSlice);
+      if (clauseMatch) {
+        const boundaryAbsolute =
+          MIN_CLAUSE_PREFIX_CHARS + clauseMatch.index + clauseMatch[0].length;
+        const candidate = text.slice(0, boundaryAbsolute).trim();
+        if (
+          candidate.length >= MIN_CLAUSE_PREFIX_CHARS &&
+          !isUnfinishedTimeRange(candidate) &&
+          !INCOMPLETE_TAIL_REGEX.test(candidate)
+        ) {
+          return boundaryAbsolute;
+        }
+      }
+    }
+
+    // 4. Fallback: if buffer grows too large (> 120 chars without boundary),
     // find the last whitespace to prevent unbounded latency.
     if (text.length >= 120) {
       const lastSpaceIdx = text.lastIndexOf(' ', 120);

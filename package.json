@@ -21,6 +21,8 @@
     "test:nl-matching": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/faq-matching-nl.test.ts",
     "test:hardcode-free": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/hardcode-free-retrieval.test.ts",
     "test:answer-suitability": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/answer-suitability-routing.test.ts",
+    "test:phase1-retrieval": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/phase1-retrieval-diagnostics.test.ts",
+    "test:tier2-streaming": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/tier2-streaming.test.ts",
     "test:playback-lifecycle": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/playback-lifecycle-lipsync.test.ts",
     "faq:backfill-embeddings": "node --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/backfill-faq-embeddings.ts",
     "faq-audio:dry-run": "node --conditions=react-server --env-file-if-exists=.env.local --import=./src/scripts/register-paths.mjs src/scripts/generate-faq-audio.ts",

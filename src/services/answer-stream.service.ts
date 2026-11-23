@@ -22,10 +22,126 @@ import {
   evaluateSentenceGrounding,
   type SentenceGroundingResult,
 } from '@/services/sentence-grounding.service';
-import { synthesizeSpeechMp3WithMetrics } from '@/services/speech.service';
+import {
+  synthesizeSpeechMp3WithMetrics,
+  type TtsSynthesisResult,
+} from '@/services/speech.service';
 import { ThaiSentenceSplitter } from '@/lib/voice/thai-sentence-splitter';
 import type { ConversationTurn } from '@/types/api';
 import type { FaqRecord } from '@/types/faq';
+
+const MAX_CONCURRENT_TTS = 2;
+
+interface OrderedTtsJob {
+  text: string;
+  settled: boolean;
+  result?: TtsSynthesisResult;
+  error?: unknown;
+  doneSignal: Promise<void>;
+  resolveDone: () => void;
+}
+
+class OrderedTtsQueue {
+  private readonly jobs: OrderedTtsJob[] = [];
+  private readonly waitingRunners: Array<() => void> = [];
+  private readonly customTtsGenerator?: (text: string) => Promise<Buffer>;
+  private activeCount = 0;
+  private aborted = false;
+
+  constructor(customTtsGenerator?: (text: string) => Promise<Buffer>) {
+    this.customTtsGenerator = customTtsGenerator;
+  }
+
+  get length(): number {
+    return this.jobs.length;
+  }
+
+  enqueue(text: string): void {
+    if (this.aborted) {
+      return;
+    }
+
+    let resolveDone!: () => void;
+    const doneSignal = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+
+    const job: OrderedTtsJob = {
+      text,
+      settled: false,
+      doneSignal,
+      resolveDone,
+    };
+    this.jobs.push(job);
+
+    const run = () => {
+      if (this.aborted) {
+        job.settled = true;
+        job.resolveDone();
+        return;
+      }
+
+      this.activeCount += 1;
+      synthesizeSpeechMp3WithMetrics(text, this.customTtsGenerator)
+        .then((res) => {
+          if (!this.aborted) {
+            job.result = res;
+          }
+        })
+        .catch((err: unknown) => {
+          if (!this.aborted) {
+            job.error = err;
+          }
+        })
+        .finally(() => {
+          this.activeCount = Math.max(0, this.activeCount - 1);
+          job.settled = true;
+          job.resolveDone();
+          this.drainNext();
+        });
+    };
+
+    if (this.activeCount < MAX_CONCURRENT_TTS) {
+      run();
+    } else {
+      this.waitingRunners.push(run);
+    }
+  }
+
+  private drainNext(): void {
+    while (!this.aborted && this.activeCount < MAX_CONCURRENT_TTS) {
+      const next = this.waitingRunners.shift();
+      if (!next) break;
+      next();
+    }
+  }
+
+  isSettled(index: number): boolean {
+    return Boolean(this.jobs[index]?.settled);
+  }
+
+  get(index: number): OrderedTtsJob | undefined {
+    return this.jobs[index];
+  }
+
+  waitFor(index: number): Promise<void> {
+    const job = this.jobs[index];
+    return job ? job.doneSignal : Promise.resolve();
+  }
+
+  abort(): void {
+    this.aborted = true;
+    while (this.waitingRunners.length > 0) {
+      this.waitingRunners.shift();
+    }
+    for (const job of this.jobs) {
+      if (!job.settled) {
+        job.settled = true;
+        job.resolveDone();
+      }
+    }
+  }
+}
 
 export interface AnswerStreamEvent {
   event:
@@ -108,6 +224,9 @@ export async function* streamGroundedAnswerEvents(
       faqCount: retrieval.faqs.length,
       matched: retrieval.matched,
       highConfidenceFastPath: retrieval.highConfidenceFastPath,
+      ...(retrieval.retrievalMetrics
+        ? { retrievalMetrics: retrieval.retrievalMetrics }
+        : {}),
     },
   };
 
@@ -142,6 +261,12 @@ export async function* streamGroundedAnswerEvents(
           retrievalMs: retrievalLatencyMs,
           llmMs: 0,
           ttsMs: 0,
+          persistentAudioLookupMs: audioLookup.lookupLatencyMs,
+          persistentAudioCacheHit:
+            audioLookup.hit && audioLookup.lookupLatencyMs === 0,
+          ...(retrieval.retrievalMetrics
+            ? { retrievalMetrics: retrieval.retrievalMetrics }
+            : {}),
         },
       },
     };
@@ -181,6 +306,12 @@ export async function* streamGroundedAnswerEvents(
           retrievalMs: retrievalLatencyMs,
           llmMs: 0,
           ttsMs: 0,
+          persistentAudioLookupMs: fallbackAudio.lookupLatencyMs,
+          persistentAudioCacheHit:
+            fallbackAudio.hit && fallbackAudio.lookupLatencyMs === 0,
+          ...(retrieval.retrievalMetrics
+            ? { retrievalMetrics: retrieval.retrievalMetrics }
+            : {}),
         },
       },
     };
@@ -214,14 +345,21 @@ export async function* streamGroundedAnswerEvents(
 
   const sentenceSplitter = new ThaiSentenceSplitter();
   let fullAccumulatedText = '';
+  let sentenceIndex = 0;
   let chunkIndex = 0;
   const heldSentences: Array<{
     text: string;
     initialStatus: SentenceGroundingResult['status'];
   }> = [];
   const approvedSpokenSentences: string[] = [];
+  const ttsQueue = new OrderedTtsQueue(customTtsGenerator);
 
   const tLlmStart = performance.now();
+  let llmTtftMs = 0;
+  let firstSentenceMs = 0;
+  let firstAudioReadyMs = 0;
+  let totalTtsMs = 0;
+  let iterator: AsyncIterator<string> | null = null;
 
   try {
     let tokenStream: AsyncIterable<string>;
@@ -255,8 +393,138 @@ export async function* streamGroundedAnswerEvents(
       })();
     }
 
-    for await (const token of tokenStream) {
-      if (signal?.aborted) return;
+    iterator = tokenStream[Symbol.asyncIterator]();
+    let pendingNext: Promise<IteratorResult<string>> | null = null;
+    let streamEnded = false;
+    let nextEmitIndex = 0;
+
+    const enqueueValidatedSentence = (sentence: string) => {
+      if (firstSentenceMs === 0) {
+        firstSentenceMs = Math.round(performance.now() - tLlmStart);
+      }
+
+      // Strict Sentence-Level Grounding Validation before any TTS call
+      const groundCheck: SentenceGroundingResult = isMatchedFaq
+        ? evaluateSentenceGrounding(sentence, retrieval.faqs)
+        : {
+            status: 'GROUNDED_SAFE',
+            reason: 'UNMATCHED_GUARDED',
+            sanitizedText: sentence,
+          };
+
+      if (groundCheck.status === 'GROUNDED_SAFE') {
+        approvedSpokenSentences.push(sentence);
+        ttsQueue.enqueue(sentence);
+      } else {
+        // Never synthesize rejected or held text during streaming.
+        // Full-answer validation below will release or replace with canonical evidence.
+        heldSentences.push({
+          text: sentence,
+          initialStatus: groundCheck.status,
+        });
+      }
+    };
+
+    while (!streamEnded || nextEmitIndex < ttsQueue.length) {
+      if (signal?.aborted) {
+        ttsQueue.abort();
+        return;
+      }
+
+      // 1. Drain any completed TTS jobs strictly in sentence order
+      while (
+        nextEmitIndex < ttsQueue.length &&
+        ttsQueue.isSettled(nextEmitIndex)
+      ) {
+        if (signal?.aborted) {
+          ttsQueue.abort();
+          return;
+        }
+        const job = ttsQueue.get(nextEmitIndex);
+        nextEmitIndex += 1;
+        if (!job) continue;
+
+        if (job.error) {
+          throw job.error;
+        }
+        if (job.result) {
+          const ttsRes = job.result;
+          totalTtsMs += ttsRes.ttsLatencyMs;
+          if (firstAudioReadyMs === 0) {
+            firstAudioReadyMs = Math.round(performance.now() - tLlmStart);
+          }
+          const audioBase64 = ttsRes.buffer.toString('base64');
+          const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
+
+          yield {
+            event: 'audio_chunk_ready',
+            data: {
+              chunkIndex: chunkIndex++,
+              text: job.text,
+              audioDataUri,
+              cached: ttsRes.cacheStatus === 'HIT',
+              latencyMs: ttsRes.ttsLatencyMs,
+              isLast: false,
+            },
+          };
+        }
+      }
+
+      if (streamEnded) {
+        if (nextEmitIndex < ttsQueue.length) {
+          await ttsQueue.waitFor(nextEmitIndex);
+        }
+        continue;
+      }
+
+      // 2. Advance LLM token stream concurrently with in-flight TTS jobs
+      if (!pendingNext) {
+        pendingNext = iterator.next();
+      }
+
+      let tokenResult: IteratorResult<string> | null = null;
+      if (nextEmitIndex < ttsQueue.length) {
+        const winner = await Promise.race([
+          pendingNext.then((value) => ({ kind: 'token' as const, value })),
+          ttsQueue
+            .waitFor(nextEmitIndex)
+            .then(() => ({ kind: 'tts' as const })),
+        ]);
+        if (winner.kind === 'tts') {
+          continue;
+        }
+        pendingNext = null;
+        tokenResult = winner.value;
+      } else {
+        tokenResult = await pendingNext;
+        pendingNext = null;
+      }
+
+      if (signal?.aborted) {
+        ttsQueue.abort();
+        return;
+      }
+
+      if (tokenResult.done) {
+        streamEnded = true;
+        const finalTrailing = sentenceSplitter.flush();
+        if (finalTrailing) {
+          yield {
+            event: 'sentence_ready',
+            data: {
+              sentenceIndex: sentenceIndex++,
+              text: finalTrailing,
+            },
+          };
+          enqueueValidatedSentence(finalTrailing);
+        }
+        continue;
+      }
+
+      const token = tokenResult.value;
+      if (llmTtftMs === 0 && token.length > 0) {
+        llmTtftMs = Math.round(performance.now() - tLlmStart);
+      }
       fullAccumulatedText += token;
 
       yield {
@@ -267,97 +535,16 @@ export async function* streamGroundedAnswerEvents(
         },
       };
 
-      // Split into sentences progressively
       const completedSentences = sentenceSplitter.feed(token);
       for (const sentence of completedSentences) {
         yield {
           event: 'sentence_ready',
           data: {
-            sentenceIndex: chunkIndex,
+            sentenceIndex: sentenceIndex++,
             text: sentence,
           },
         };
-
-        // Strict Sentence-Level Grounding Validation
-        const groundCheck: SentenceGroundingResult = isMatchedFaq
-          ? evaluateSentenceGrounding(sentence, retrieval.faqs)
-          : {
-              status: 'GROUNDED_SAFE',
-              reason: 'UNMATCHED_GUARDED',
-              sanitizedText: sentence,
-            };
-
-        if (groundCheck.status === 'GROUNDED_SAFE') {
-          // Immediately synthesize speech for this sentence!
-          const ttsRes = await synthesizeSpeechMp3WithMetrics(
-            sentence,
-            customTtsGenerator,
-          );
-          const audioBase64 = ttsRes.buffer.toString('base64');
-          const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
-          approvedSpokenSentences.push(sentence);
-
-          yield {
-            event: 'audio_chunk_ready',
-            data: {
-              chunkIndex: chunkIndex++,
-              text: sentence,
-              audioDataUri,
-              cached: ttsRes.cacheStatus === 'HIT',
-              latencyMs: ttsRes.ttsLatencyMs,
-              isLast: false,
-            },
-          };
-        } else if (groundCheck.status === 'FABRICATION_DETECTED') {
-          // Never synthesize rejected text. Full-answer validation below will
-          // replace it with verified canonical evidence.
-          heldSentences.push({
-            text: sentence,
-            initialStatus: groundCheck.status,
-          });
-        } else {
-          heldSentences.push({
-            text: sentence,
-            initialStatus: groundCheck.status,
-          });
-        }
-      }
-    }
-
-    // Flush any trailing sentence
-    const finalTrailing = sentenceSplitter.flush();
-    if (finalTrailing) {
-      const trailingCheck: SentenceGroundingResult = isMatchedFaq
-        ? evaluateSentenceGrounding(finalTrailing, retrieval.faqs)
-        : {
-            status: 'GROUNDED_SAFE',
-            reason: 'UNMATCHED_GUARDED',
-            sanitizedText: finalTrailing,
-          };
-
-      if (trailingCheck.status === 'GROUNDED_SAFE') {
-        const ttsRes = await synthesizeSpeechMp3WithMetrics(
-          finalTrailing,
-          customTtsGenerator,
-        );
-        const audioBase64 = ttsRes.buffer.toString('base64');
-        approvedSpokenSentences.push(finalTrailing);
-        yield {
-          event: 'audio_chunk_ready',
-          data: {
-            chunkIndex: chunkIndex++,
-            text: finalTrailing,
-            audioDataUri: `data:audio/mpeg;base64,${audioBase64}`,
-            cached: ttsRes.cacheStatus === 'HIT',
-            latencyMs: ttsRes.ttsLatencyMs,
-            isLast: false,
-          },
-        };
-      } else {
-        heldSentences.push({
-          text: finalTrailing,
-          initialStatus: trailingCheck.status,
-        });
+        enqueueValidatedSentence(sentence);
       }
     }
 
@@ -393,6 +580,10 @@ export async function* streamGroundedAnswerEvents(
             recheck.sanitizedText,
             customTtsGenerator,
           );
+          totalTtsMs += ttsRes.ttsLatencyMs;
+          if (firstAudioReadyMs === 0) {
+            firstAudioReadyMs = Math.round(performance.now() - tLlmStart);
+          }
           const audioBase64 = ttsRes.buffer.toString('base64');
           approvedSpokenSentences.push(recheck.sanitizedText);
           yield {
@@ -423,6 +614,10 @@ export async function* streamGroundedAnswerEvents(
             recoveryCheck.sanitizedText,
             customTtsGenerator,
           );
+          totalTtsMs += ttsRes.ttsLatencyMs;
+          if (firstAudioReadyMs === 0) {
+            firstAudioReadyMs = Math.round(performance.now() - tLlmStart);
+          }
           const audioBase64 = ttsRes.buffer.toString('base64');
           approvedSpokenSentences.push(recoveryCheck.sanitizedText);
           yield {
@@ -451,11 +646,19 @@ export async function* streamGroundedAnswerEvents(
         totalChunks: chunkIndex,
         timings: {
           retrievalMs: retrievalLatencyMs,
+          llmTtftMs,
+          firstSentenceMs,
+          firstAudioReadyMs,
           llmMs: llmDurationMs,
+          ttsMs: totalTtsMs,
+          ...(retrieval.retrievalMetrics
+            ? { retrievalMetrics: retrieval.retrievalMetrics }
+            : {}),
         },
       },
     };
   } catch (err) {
+    ttsQueue.abort();
     if (signal?.aborted) return;
     yield {
       event: 'error',
@@ -465,5 +668,10 @@ export async function* streamGroundedAnswerEvents(
           err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการสตรีมคำตอบ',
       },
     };
+  } finally {
+    ttsQueue.abort();
+    if (signal?.aborted && iterator?.return) {
+      await iterator.return().catch(() => {});
+    }
   }
 }
