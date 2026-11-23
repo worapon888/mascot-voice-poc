@@ -6,17 +6,26 @@ const FAQ_TABLE = 'faqs';
 const FAQ_SELECT_COLUMNS =
   'id, question, answer, keywords, is_active, created_at';
 const MAX_POC_FAQ_LIMIT = 10;
+const MAX_DATABASE_CANDIDATE_LIMIT = 50;
+const MAX_EXACT_LOOKUP_CACHE_ENTRIES = 1_000;
 
 interface CachedActiveFaqs {
   records: FaqRecord[];
   cachedAt: number;
 }
 
+interface CachedExactFaqLookup {
+  record: FaqRecord | null;
+  cachedAt: number;
+}
+
 let activeFaqsCache: CachedActiveFaqs | null = null;
+const exactFaqLookupCache = new Map<string, CachedExactFaqLookup>();
 export const ACTIVE_FAQS_CACHE_TTL_MS = 60_000; // 60s TTL
 
 export function resetActiveFaqsCacheForTesting(): void {
   activeFaqsCache = null;
+  exactFaqLookupCache.clear();
 }
 
 export function getActiveFaqsCacheStats(): {
@@ -93,6 +102,131 @@ export async function getActiveFaqs(
 }
 
 /**
+ * Looks up a canonical active FAQ question directly in PostgreSQL. This keeps
+ * exact matching available beyond the small in-memory POC window without
+ * loading an entire 500–600 row corpus on every request.
+ */
+export async function findActiveFaqByQuestion(
+  question: string,
+): Promise<FaqRecord | null> {
+  const normalizedQuestion = question.normalize('NFC').trim();
+  if (!normalizedQuestion) return null;
+
+  const cached = exactFaqLookupCache.get(normalizedQuestion);
+  if (cached && Date.now() - cached.cachedAt < ACTIVE_FAQS_CACHE_TTL_MS) {
+    return cached.record;
+  }
+
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from(FAQ_TABLE)
+    .select(FAQ_SELECT_COLUMNS)
+    .eq('is_active', true)
+    .eq('question', normalizedQuestion)
+    .maybeSingle();
+
+  if (error) {
+    throw new FaqRepositoryError(
+      'Failed to look up an active FAQ by canonical question.',
+      error.code || 'SUPABASE_QUERY_ERROR',
+    );
+  }
+
+  const record = (data as FaqRecord | null) ?? null;
+  if (exactFaqLookupCache.size >= MAX_EXACT_LOOKUP_CACHE_ENTRIES) {
+    const oldestKey = exactFaqLookupCache.keys().next().value;
+    if (oldestKey !== undefined) exactFaqLookupCache.delete(oldestKey);
+  }
+  exactFaqLookupCache.set(normalizedQuestion, {
+    record,
+    cachedAt: Date.now(),
+  });
+  return record;
+}
+
+/** Retrieves referenced active FAQs by ID for conversation context. */
+export async function getActiveFaqsByIds(
+  ids: ReadonlyArray<number>,
+): Promise<FaqRecord[]> {
+  const safeIds = Array.from(
+    new Set(ids.filter((id) => Number.isInteger(id) && id > 0)),
+  ).slice(0, MAX_DATABASE_CANDIDATE_LIMIT);
+  if (safeIds.length === 0) return [];
+
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from(FAQ_TABLE)
+    .select(FAQ_SELECT_COLUMNS)
+    .eq('is_active', true)
+    .in('id', safeIds);
+
+  if (error) {
+    throw new FaqRepositoryError(
+      'Failed to retrieve active FAQs by context IDs.',
+      error.code || 'SUPABASE_QUERY_ERROR',
+    );
+  }
+
+  const byId = new Map(
+    ((data ?? []) as FaqRecord[]).map((faq) => [faq.id, faq]),
+  );
+  return safeIds.flatMap((id) => {
+    const faq = byId.get(id);
+    return faq ? [faq] : [];
+  });
+}
+
+/**
+ * Database-side lexical fallback for hybrid RPC outages. PostgreSQL limits the
+ * candidate set before records reach the application process.
+ */
+export async function searchActiveFaqsLexically(
+  query: string,
+  limit = 20,
+): Promise<FaqRecord[]> {
+  const normalizedQuery = query.normalize('NFC').trim();
+  if (!normalizedQuery) return [];
+
+  // A fallback query must retain candidates for every stated intent. Joining
+  // terms with AND can discard two individually relevant FAQs in a multi-intent
+  // question. A database-side OR keeps the candidate set broad; the existing
+  // application scorer still decides relevance and coverage afterward.
+  const searchTerms = Array.from(
+    new Set(
+      normalizedQuery
+        .split(/\s+/u)
+        .map((term) => term.replace(/[^\p{L}\p{M}\p{N}]/gu, ''))
+        .filter(Boolean),
+    ),
+  ).slice(0, 12);
+  const lexicalOrFilter = searchTerms
+    .flatMap((term) => [`question.ilike.*${term}*`, `answer.ilike.*${term}*`])
+    .join(',');
+  if (!lexicalOrFilter) return [];
+
+  const safeLimit = Math.min(
+    Math.max(1, Math.trunc(limit)),
+    MAX_DATABASE_CANDIDATE_LIMIT,
+  );
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from(FAQ_TABLE)
+    .select(FAQ_SELECT_COLUMNS)
+    .eq('is_active', true)
+    .or(lexicalOrFilter)
+    .limit(safeLimit);
+
+  if (error) {
+    throw new FaqRepositoryError(
+      'Failed to retrieve database-side lexical FAQ candidates.',
+      error.code || 'SUPABASE_QUERY_ERROR',
+    );
+  }
+
+  return (data ?? []) as FaqRecord[];
+}
+
+/**
  * Retrieves a single FAQ record by ID regardless of active status.
  * Used by persistent audio verification to check current version freshness.
  */
@@ -166,6 +300,7 @@ export async function setFaqActiveStatus(
   }
 
   activeFaqsCache = null;
+  exactFaqLookupCache.clear();
   return data as FaqRecord;
 }
 
@@ -194,5 +329,6 @@ export async function updateFaqAnswer(
   }
 
   activeFaqsCache = null;
+  exactFaqLookupCache.clear();
   return data as FaqRecord;
 }

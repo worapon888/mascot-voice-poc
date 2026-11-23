@@ -1,5 +1,6 @@
 import 'server-only';
 import { FABRICATED_CLAIM_PATTERNS } from '@/services/answer.service';
+import { splitThaiSentences } from '@/lib/voice/thai-sentence-splitter';
 import type { FaqRecord } from '@/types/faq';
 
 export type SentenceGroundingStatus =
@@ -9,6 +10,12 @@ export interface SentenceGroundingResult {
   status: SentenceGroundingStatus;
   reason: string;
   sanitizedText: string;
+}
+
+export interface CompleteAnswerGroundingResult {
+  approved: boolean;
+  reason: string;
+  sentenceResults: SentenceGroundingResult[];
 }
 
 /**
@@ -137,5 +144,38 @@ export function evaluateSentenceGrounding(
     status: 'GROUNDED_SAFE',
     reason: 'VERIFIED_GROUNDED_EVIDENCE',
     sanitizedText: normalized,
+  };
+}
+
+/**
+ * Re-checks every sentence after the complete streamed answer is available.
+ * A sentence that remains held or fabricated is never approved for speech.
+ */
+export function evaluateCompleteAnswerGrounding(
+  answerText: string,
+  evidenceFaqs: ReadonlyArray<FaqRecord>,
+): CompleteAnswerGroundingResult {
+  const sentences = splitThaiSentences(answerText).filter(
+    (sentence) => sentence.trim().length > 0,
+  );
+  if (sentences.length === 0) {
+    return {
+      approved: false,
+      reason: 'EMPTY_COMPLETE_ANSWER',
+      sentenceResults: [],
+    };
+  }
+
+  const sentenceResults = sentences.map((sentence) =>
+    evaluateSentenceGrounding(sentence, evidenceFaqs),
+  );
+  const rejected = sentenceResults.find(
+    (result) => result.status !== 'GROUNDED_SAFE',
+  );
+
+  return {
+    approved: !rejected,
+    reason: rejected?.reason ?? 'COMPLETE_ANSWER_GROUNDED',
+    sentenceResults,
   };
 }

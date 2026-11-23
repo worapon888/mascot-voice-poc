@@ -2,7 +2,16 @@ import 'server-only';
 import { performance } from 'node:perf_hooks';
 import { getOpenAIClient } from '@/lib/openai/client';
 import { getSupabaseServerClient } from '@/lib/supabase/client';
-import { getActiveFaqs } from '@/repositories/faq.repository';
+import {
+  findActiveFaqByQuestion,
+  getActiveFaqs,
+  getActiveFaqsByIds,
+} from '@/repositories/faq.repository';
+import {
+  evaluateAnswerSuitability,
+  extractRequiredIntentSegments,
+  type IntentCoverage,
+} from '@/services/answer-suitability.service';
 import {
   extractQuestionCore,
   hasContextualFollowUpSignal,
@@ -212,10 +221,31 @@ export async function executeHybridFaqRetrieval(
     ? await activeFaqsPromise
     : await getActiveFaqs();
 
+  const isFollowUp = hasContextualFollowUpSignal(rawTranscript);
+  const referencedFaqIds: number[] = [];
+  if (isFollowUp) {
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const turn = conversationHistory[i];
+      for (const faqId of turn.faqIds ?? []) {
+        if (!referencedFaqIds.includes(faqId)) referencedFaqIds.push(faqId);
+      }
+    }
+  }
+
+  const contextualFaqs =
+    !activeFaqsPromise && referencedFaqIds.length > 0
+      ? await getActiveFaqsByIds(referencedFaqIds)
+      : activeFaqs.filter((faq) => referencedFaqIds.includes(faq.id));
+  const candidateFaqMap = new Map<number, FaqRecord>();
+  for (const faq of [...activeFaqs, ...contextualFaqs]) {
+    candidateFaqMap.set(faq.id, faq);
+  }
+  const applicationCandidateFaqs = Array.from(candidateFaqMap.values());
+
   // ---------------------------------------------------------------------------
   // Stage A: Exact / High-Confidence Lexical Fast Path (0ms embedding bypass)
   // ---------------------------------------------------------------------------
-  const exactFaq = activeFaqs.find((f) => {
+  let exactFaq = applicationCandidateFaqs.find((f) => {
     const normQ = normalizeThaiText(f.question);
     const coreQ = extractQuestionCore(normQ);
     const spacelessQ = coreQ.replace(/\s+/g, '');
@@ -224,6 +254,15 @@ export async function executeHybridFaqRetrieval(
       spacelessCore === normQ.replace(/\s+/g, '')
     );
   });
+
+  // The in-memory window is intentionally small. Query PostgreSQL only when a
+  // local exact match misses, so canonical questions beyond the first 10 FAQs
+  // retain the embedding-free fast path without loading the full corpus.
+  if (!exactFaq && !activeFaqsPromise) {
+    exactFaq =
+      (await findActiveFaqByQuestion(rawTranscript.normalize('NFC').trim())) ??
+      undefined;
+  }
 
   if (exactFaq) {
     const retrievalLatencyMs = Math.round(performance.now() - t0);
@@ -243,6 +282,15 @@ export async function executeHybridFaqRetrieval(
       highConfidenceFastPath: true,
       fastPathMatchReason: 'EXACT_QUESTION',
       retrievalLatencyMs,
+      answerSuitability: 'DIRECT',
+      intentCoverage: {
+        status: 'COMPLETE',
+        requiredIntents: [coreQuery || norm],
+        supportingFaqIds: [exactFaq.id],
+        uncoveredIntents: [],
+      },
+      suitabilityReasons: ['EXACT_APPROVED_QUESTION'],
+      suitabilityCheckDurationMs: 0,
     };
   }
 
@@ -266,7 +314,7 @@ export async function executeHybridFaqRetrieval(
   // ---------------------------------------------------------------------------
   // Stage C: Application-Level Thai Lexical Ranking & Supabase Hybrid RPC
   // ---------------------------------------------------------------------------
-  const appLexicalScored = activeFaqs
+  const appLexicalScored = applicationCandidateFaqs
     .map((faq) => ({
       faq,
       match: scoreFaqRecord(politeStripped, coreQuery, faq),
@@ -310,13 +358,21 @@ export async function executeHybridFaqRetrieval(
       highConfidenceFastPath: false,
       fastPathMatchReason: 'NONE',
       retrievalLatencyMs,
+      answerSuitability: 'UNSUITABLE',
+      intentCoverage: {
+        status: 'NONE',
+        requiredIntents: extractRequiredIntentSegments(rawTranscript),
+        supportingFaqIds: [],
+        uncoveredIntents: extractRequiredIntentSegments(rawTranscript),
+      },
+      suitabilityReasons: ['NO_RETRIEVAL_CANDIDATE'],
+      suitabilityCheckDurationMs: 0,
     };
   }
 
   // ---------------------------------------------------------------------------
   // Stage D: Reciprocal Rank Fusion & Context Bias Boost
   // ---------------------------------------------------------------------------
-  const isFollowUp = hasContextualFollowUpSignal(rawTranscript);
   let contextReferencedFaqId: number | null = null;
 
   if (conversationHistory.length > 0 && isFollowUp) {
@@ -364,7 +420,7 @@ export async function executeHybridFaqRetrieval(
     top2.semantic_similarity > 0.35;
 
   // Convert top row to FaqRecord
-  const matchedFaqRecord: FaqRecord = {
+  const retrievedTopFaqRecord: FaqRecord = {
     id: top1.id,
     question: top1.question,
     answer: top1.answer,
@@ -373,14 +429,92 @@ export async function executeHybridFaqRetrieval(
     created_at: new Date().toISOString(),
   };
 
+  const contextualEvidenceFaq =
+    contextReferencedFaqId === null
+      ? undefined
+      : contextualFaqs.find((faq) => faq.id === contextReferencedFaqId);
+  const matchedFaqRecord = contextualEvidenceFaq ?? retrievedTopFaqRecord;
+
   // Evaluate Evidence Sufficiency
-  const { sufficiency, suggestedTier } = evaluateGenericEvidenceSufficiency(
+  const baseEvidenceEvaluation = evaluateGenericEvidenceSufficiency(
     rawTranscript,
     matchedFaqRecord,
     top1.semantic_similarity,
     simMargin,
     top1.lexical_rank,
   );
+  const sufficiency =
+    baseEvidenceEvaluation.sufficiency === 'INSUFFICIENT' &&
+    contextualEvidenceFaq
+      ? 'PARTIAL'
+      : baseEvidenceEvaluation.sufficiency;
+  const suggestedTier = contextualEvidenceFaq
+    ? 'TIER_2'
+    : baseEvidenceEvaluation.suggestedTier;
+
+  // Resolve explicit intent segments against the already-retrieved candidates.
+  // No additional embedding, LLM, or network call is introduced here.
+  const requiredIntents = extractRequiredIntentSegments(rawTranscript);
+  const evidenceFaqMap = new Map<number, FaqRecord>();
+  for (const row of adjustedRows) {
+    evidenceFaqMap.set(row.id, {
+      id: row.id,
+      question: row.question,
+      answer: row.answer,
+      keywords: row.keywords || [],
+      is_active: true,
+      created_at: new Date().toISOString(),
+    });
+  }
+  for (const faq of contextualFaqs) evidenceFaqMap.set(faq.id, faq);
+  const rpcFaqs = Array.from(evidenceFaqMap.values());
+  const supportingFaqIds: number[] = [];
+  const uncoveredIntents: string[] = [];
+
+  if (sufficiency === 'INSUFFICIENT' && !contextualEvidenceFaq) {
+    uncoveredIntents.push(...requiredIntents);
+  } else {
+    for (const intent of requiredIntents) {
+      const normalizedIntent = stripTrailingPoliteParticles(
+        normalizeThaiText(intent),
+      );
+      const intentCore = extractQuestionCore(normalizedIntent);
+      const bestSupport = rpcFaqs
+        .map((faq) => scoreFaqRecord(normalizedIntent, intentCore, faq))
+        .sort((a, b) => b.score - a.score)[0];
+
+      if (bestSupport && bestSupport.score >= 35) {
+        if (!supportingFaqIds.includes(bestSupport.faq.id)) {
+          supportingFaqIds.push(bestSupport.faq.id);
+        }
+      } else if (requiredIntents.length === 1 && contextualEvidenceFaq) {
+        supportingFaqIds.push(contextualEvidenceFaq.id);
+      } else if (requiredIntents.length === 1 && isMatchedCandidate(top1)) {
+        supportingFaqIds.push(top1.id);
+      } else {
+        uncoveredIntents.push(intent);
+      }
+    }
+  }
+
+  const intentCoverage: IntentCoverage = {
+    status:
+      supportingFaqIds.length === 0
+        ? 'NONE'
+        : uncoveredIntents.length === 0
+          ? 'COMPLETE'
+          : 'PARTIAL',
+    requiredIntents,
+    supportingFaqIds,
+    uncoveredIntents,
+  };
+  const suitabilityEvaluation = evaluateAnswerSuitability({
+    normalizedQuery: rawTranscript,
+    evidenceSufficiency: sufficiency,
+    exactQuestionMatch: false,
+    contextualFollowUp: isFollowUp && conversationHistory.length > 0,
+    intentCoverage,
+  });
 
   // Confidence assessment
   let confidence: 'HIGH' | 'MEDIUM' | 'LOW' = 'MEDIUM';
@@ -402,6 +536,7 @@ export async function executeHybridFaqRetrieval(
     confidence === 'HIGH' &&
     sufficiency === 'SUFFICIENT' &&
     suggestedTier === 'TIER_1' &&
+    suitabilityEvaluation.suitability === 'DIRECT' &&
     !isAmbiguous;
 
   const scoredMatches: ScoredFaqMatch[] = adjustedRows.map((r) => ({
@@ -420,16 +555,30 @@ export async function executeHybridFaqRetrieval(
     ],
   }));
 
-  const matchedFaqs = isMatched ? [matchedFaqRecord] : [];
+  const matchedFaqs: FaqRecord[] = [];
+  if (isMatched) {
+    for (const faqId of supportingFaqIds) {
+      const supportingFaq = rpcFaqs.find((faq) => faq.id === faqId);
+      if (supportingFaq && !matchedFaqs.some((faq) => faq.id === faqId)) {
+        matchedFaqs.push(supportingFaq);
+      }
+    }
+    if (!matchedFaqs.some((faq) => faq.id === matchedFaqRecord.id)) {
+      matchedFaqs.push(matchedFaqRecord);
+    }
+  }
   if (isAmbiguous && top2) {
-    matchedFaqs.push({
+    const ambiguousFaq = {
       id: top2.id,
       question: top2.question,
       answer: top2.answer,
       keywords: top2.keywords || [],
       is_active: true,
       created_at: new Date().toISOString(),
-    });
+    };
+    if (!matchedFaqs.some((faq) => faq.id === ambiguousFaq.id)) {
+      matchedFaqs.push(ambiguousFaq);
+    }
   }
 
   return {
@@ -441,8 +590,18 @@ export async function executeHybridFaqRetrieval(
     scoredMatches,
     highConfidenceFastPath: isHighConfidenceFastPath,
     fastPathMatchReason: isHighConfidenceFastPath
-      ? 'APPROVED_INTENT_ALIAS'
+      ? 'SUITABLE_PARAPHRASE'
       : 'NONE',
     retrievalLatencyMs,
+    answerSuitability: suitabilityEvaluation.suitability,
+    intentCoverage,
+    suitabilityReasons: suitabilityEvaluation.reasons,
+    suitabilityCheckDurationMs: suitabilityEvaluation.durationMs,
   };
+}
+
+function isMatchedCandidate(
+  row: HybridRpcRow | undefined,
+): row is HybridRpcRow {
+  return Boolean(row);
 }
